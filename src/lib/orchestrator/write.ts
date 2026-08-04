@@ -24,6 +24,9 @@ export interface WriteInput {
   assistant_turn?: ChatTurn;
   visible_to?: string[];
   extractor?: Extractor;
+  /** Threaded to the extractor so facts get attributed to the right
+   *  person. Omitting it is what produced mis-attributed canon rows. */
+  user_persona?: { name: string; description?: string };
 }
 
 export async function writeTurn(

@@ -326,6 +326,9 @@ export class Orchestrator {
           assistant_turn,
           visible_to: scene ? sceneVisibleTo(scene) : ["*"],
           extractor: this.deps.extractor,
+          // Without this the extractor knows only the character's name and
+          // attributes the user's facts to the character.
+          user_persona: this.deps.userPersona,
         });
         await reinforceAndMaybePromote(this.deps.client, composed.heuristic, {
           session_id: req.session_id,

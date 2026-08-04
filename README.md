@@ -42,7 +42,7 @@ Both are multi-platform (linux/amd64 + linux/arm64) and rebuilt on every push to
 
 1. **Settings → Your persona** — name + optional description
 2. **Settings → Providers** — add Ollama (local), OpenAI-compat, or Anthropic with a model name
-3. **Settings → Extraction provider** (optional) — small/fast model for background fact extraction (e.g. `qwen2.5:1.5b`)
+3. **Settings → Extraction provider** (optional) — small/fast model for background fact extraction. **Use 7B or larger** (e.g. `qwen2.5:7b`). Measured 2026-08-04: at 1.5B the extractor cannot reliably follow fact-attribution rules and will write the user's facts as facts about the character — e.g. storing *"Ren's birthday is April 2nd"* when April 2nd is yours and the character merely repeated it back. 7B and 9B attribute correctly. A structural filter catches the worst artifacts regardless of model, but it cannot repair a confidently mis-attributed fact.
 4. **Settings → Proactive messages** — off by default; `passive` lets the character take initiative when urges accumulate and you've been idle
 5. **+ card** to import a v2/v3 character card, or **demo: Ren** to try the built-in character
 6. Type. Memories appear in the right sidebar as they land.

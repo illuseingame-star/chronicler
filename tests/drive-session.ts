@@ -38,7 +38,10 @@ const STACK_URL =
   process.env.CHRONICLER_URL ?? "http://127.0.0.1:3001/api/mcp";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434";
 const GEN_MODEL = process.env.GEN_MODEL ?? "qwen3.5:4b";
-const EXTRACT_MODEL = process.env.EXTRACT_MODEL ?? "qwen2.5:1.5b";
+// 7b, not 1.5b. At 1.5b the extractor cannot follow the fact-attribution
+// rules and writes the user's facts onto the character ("Ren's birthday is
+// April 2nd"). Verified 2026-08-04 — see scripts/verify-attribution-fix.ts.
+const EXTRACT_MODEL = process.env.EXTRACT_MODEL ?? "qwen2.5:7b";
 
 const TAG = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const CHAR_ID = `ren-driver-${TAG}`;
