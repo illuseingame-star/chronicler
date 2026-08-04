@@ -1,10 +1,18 @@
-# Chronicler
+# Chronicler — self-hosted AI roleplay client with long-term memory
 
-**Local-first roleplay client with a memory that actually works.**
+**A local-first alternative to SillyTavern, RisuAI, and Faraday, built around memory that survives long campaigns.**
 
-Chronicler is an open-source, self-hosted roleplay/character-chat app. You run it on your own machine via `docker compose up`. It imports the community v2/v3 character-card format (chub.ai-compatible), talks to any OpenAI-compatible LLM endpoint (OpenAI, Anthropic, Ollama, OpenRouter, llama.cpp, vLLM, nano-gpt, …), and remembers the things that matter about every character across every session — automatically, locally, without sending anything to a cloud.
+[![Docker images](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/orgs/yantrikos/packages)
+[![License](https://img.shields.io/badge/license-see%20LICENSE-lightgrey)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-27%2F27%20green-brightgreen)](#develop)
 
-> The problem with existing RP clients isn't the UI — it's that memory falls apart after a few sessions. Chronicler is built around a persistent cognitive memory engine (YantrikDB) and a strict three-tier write contract that keeps canon clean and accumulates real continuity over hundreds of hours.
+Chronicler is an open-source, self-hosted **AI roleplay and character-chat app** you run on your own machine with `docker compose up`. It imports the community **v2/v3 character card** format (chub.ai-compatible), talks to **any OpenAI-compatible LLM** — Ollama, OpenAI, Anthropic, OpenRouter, llama.cpp, vLLM, nano-gpt — and remembers what matters about every character across every session, automatically and locally, without sending anything to a cloud.
+
+> The problem with existing RP clients isn't the UI — it's that **memory falls apart after a few sessions**. Chronicler is built on a persistent cognitive memory engine ([YantrikDB](https://github.com/yantrikos/yantrikdb)) with a strict three-tier write contract that keeps canon clean and accumulates real continuity over hundreds of hours.
+
+**What you get that other clients don't:** verified long-term memory instead of a rolling summary · per-memory `visible_to` ACL so characters can't recall secrets they were never told · a prompt inspector showing exactly what was sent and why · **native MCP support** (tools, resources, prompts) · an extension SDK on npm.
+
+**Looking for** a SillyTavern alternative with real memory · an AI companion that remembers across sessions · a local/offline character chat app · long-term memory for LLM roleplay · an MCP-native chat client? That's what this is.
 
 ---
 
