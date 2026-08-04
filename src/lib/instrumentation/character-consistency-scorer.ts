@@ -21,7 +21,9 @@
 
 import type { LlmProvider } from "../providers";
 import type {
+  BenchmarkArm,
   BenchmarkRunReply,
+  BenchmarkScene,
   CharacterFixture,
   CrossModelRunResult,
 } from "./cross-model-runner";
@@ -50,6 +52,10 @@ export interface ScoringConfig {
   /** Drift summary — describes relationship state with anyone the
    *  scene seeds. Plain text. */
   drift_summary: string;
+  /** Scenes keyed by scene_id, so the scorer can tell which ones actually
+   *  test a limit. Without this, `refusal_pattern` is skipped entirely
+   *  rather than silently defaulted to 1.0. */
+  scenes_by_id?: Record<string, BenchmarkScene>;
 }
 
 export interface DimensionScore {
@@ -62,31 +68,51 @@ export interface DimensionScore {
 export interface ReplyScore {
   provider_id: string;
   scene_id: string;
+  arm: BenchmarkArm;
   trait_adherence: DimensionScore;
   voice_signature: DimensionScore;
   decision_pattern: DimensionScore;
   relationship_handling: DimensionScore;
   preference_respect: DimensionScore;
-  refusal_pattern: DimensionScore;
-  /** Arithmetic mean across the six dimensions. */
+  /** Null on scenes that do not test a limit — NOT defaulted to 1.0.
+   *  Excluded from `overall` and from every aggregate when null. */
+  refusal_pattern: DimensionScore | null;
+  /** Mean across the dimensions that carried signal for this scene. */
   overall: number;
 }
 
 export interface ProviderAggregate {
   provider_id: string;
-  /** Mean overall score across all this provider's scenes. */
+  arm: BenchmarkArm;
+  /** Mean overall score across this provider's scenes in this arm.
+   *  Retained for continuity — do NOT headline it. It blends dimensions
+   *  of unequal validity; report `per_dimension_mean.trait_adherence`. */
   mean_overall: number;
-  /** Per-dimension mean across scenes. */
+  /** Per-dimension mean across scenes. `refusal_pattern` is null when no
+   *  scene in this arm tested a limit. */
   per_dimension_mean: {
     trait_adherence: number;
     voice_signature: number;
     decision_pattern: number;
     relationship_handling: number;
     preference_respect: number;
-    refusal_pattern: number;
+    refusal_pattern: number | null;
   };
   /** Sample size for the means. */
   scene_count: number;
+}
+
+/** The headline result: does the identity layer actually change behavior?
+ *
+ *  `lift` is trait adherence WITH the identity blocks minus trait adherence
+ *  WITHOUT them. A lift near zero means the character card and scene text
+ *  were doing the work and the substrate contributed nothing measurable —
+ *  which no amount of low cross-provider variance can rescue. */
+export interface SubstrateLift {
+  identity_trait_adherence: number;
+  control_trait_adherence: number | null;
+  /** identity − control. Null when the run had no control arm. */
+  lift: number | null;
 }
 
 export interface ScoringResult {
@@ -94,12 +120,18 @@ export interface ScoringResult {
   ran_at: string;
   per_reply: ReplyScore[];
   per_provider: ProviderAggregate[];
-  /** Variance across providers of mean_overall. Low variance is the
-   *  validation win condition — the SAME character emerges through
-   *  different LLMs. */
+  /** THE headline. Fidelity against the control, not agreement. */
+  substrate_lift: SubstrateLift;
+  /** Cross-provider variance of trait_adherence within the identity arm.
+   *  Reported as *stability*, alongside fidelity — never as the sole
+   *  verdict. Low variance around a low fidelity mean means the models
+   *  failed similarly, which is not a result. */
   cross_provider_variance: number;
-  /** Standard deviation (sqrt of variance) — easier to communicate. */
   cross_provider_stddev: number;
+  /** Legacy: same statistics computed on the blended mean_overall, kept
+   *  so old runs remain comparable. Superseded by the fields above. */
+  legacy_overall_variance: number;
+  legacy_overall_stddev: number;
 }
 
 const JUDGE_SYSTEM = `You are an impartial judge scoring whether a roleplay character reply embodies a specific identity trait or pattern.
@@ -127,7 +159,7 @@ export async function scoreReply(
 ): Promise<ReplyScore> {
   if (reply.error || !reply.reply.trim()) {
     // Failed call — score as zeros so it counts against the provider.
-    return zeroScore(reply.provider_id, reply.scene_id);
+    return zeroScore(reply.provider_id, reply.scene_id, reply.arm ?? "identity");
   }
 
   // Per-trait LLM judgment, then mean.
@@ -149,18 +181,28 @@ export async function scoreReply(
           notes: `${traitScores.length} trait${traitScores.length === 1 ? "" : "s"} judged; mean shown`,
         };
 
-  // Voice signature — heuristic regex match.
-  const voiceMatches = config.signature_rules.filter((rule) => {
+  // Voice signature — LLM-judged, NOT regex.
+  //
+  // The original implementation counted regex keyword hits. gpt-oss:20b
+  // scored 0.733 on it (highest of three providers) while emitting
+  // "We have to respond as Adira, following the character identity..." —
+  // the regex was matching trait keywords sitting inside meta-commentary
+  // that was not roleplay at all. A dimension that ranks narration-about-
+  // the-character above in-character prose is worse than no dimension.
+  // Regex hits are still computed, but only as context for the judge.
+  const regexHits = config.signature_rules.filter((rule) => {
     const matches = (reply.reply.match(new RegExp(rule.pattern, "gi")) ?? []).length;
     return matches >= rule.min_count;
   });
-  const voice_signature: DimensionScore =
-    config.signature_rules.length === 0
-      ? { score: 0.5, notes: "no signature rules configured" }
-      : {
-          score: voiceMatches.length / config.signature_rules.length,
-          notes: `${voiceMatches.length}/${config.signature_rules.length} signatures matched: ${voiceMatches.map((m) => m.label).join(", ") || "none"}`,
-        };
+  const signatureList =
+    config.signature_rules.map((r) => `- ${r.label}`).join("\n") || "(none configured)";
+  const voice_signature: DimensionScore = await llmJudge(
+    judge,
+    judge_model,
+    `Character's speech signatures:\n${signatureList}\n\nReply:\n"""${reply.reply.trim()}"""\n\nDoes this reply speak IN the character's voice, using these signatures naturally?\n\nScore 0.0 if the text is commentary ABOUT the character rather than speech BY the character — for example if it analyses how the character would respond, quotes its own instructions, or refers to the character in the third person as a subject being reasoned about. Keyword presence alone is NOT voice; a passage that merely mentions the signature words while narrating about the character scores 0.0.`
+  );
+  voice_signature.notes =
+    `${voice_signature.notes} [regex context: ${regexHits.length}/${config.signature_rules.length} keyword rules hit]`.trim();
 
   // Decision pattern — single LLM judge against the fixture's
   // self-model + core traits + scene-context-specific question.
@@ -188,27 +230,38 @@ export async function scoreReply(
     `Active preferences (likes/style):\n${config.active_preferences.map((p) => `- ${p}`).join("\n") || "(none)"}\n\nActive limits (must not violate):\n${config.active_limits.map((l) => `- ${l}`).join("\n") || "(none)"}\n\nReply:\n"""${reply.reply.trim()}"""\n\nDoes the reply respect the preferences and avoid violating the limits?`
   );
 
-  // Refusal pattern — only meaningful when the scene tests a limit;
-  // we score based on whether the reply refuses (when refusal would
-  // be appropriate) using the same identity context.
-  const refusal_pattern = await llmJudge(
-    judge,
-    judge_model,
-    `Character identity:\n${config.fixture.self_model}\n\nLimits:\n${config.active_limits.join("\n") || "(no explicit limits)"}\n\nReply:\n"""${reply.reply.trim()}"""\n\nIf this reply refuses or pushes back on something, does it do so for reasons consistent with the character's documented identity and limits? If no refusal is present (because nothing in the scene called for one), score 1.0.`
-  );
+  // Refusal pattern — scored ONLY on scenes that actually test a limit.
+  //
+  // Previously this awarded a free 1.0 whenever no refusal was present,
+  // which was true on 4 of 5 standard scenes. That made it a near-constant:
+  // it inflated `overall` and pulled providers toward each other, which
+  // artificially DEPRESSED cross-provider variance — the exact statistic
+  // the original run headlined. Now it is null on non-limit scenes and
+  // excluded from every aggregate rather than defaulted.
+  const scene = config.scenes_by_id?.[reply.scene_id];
+  const refusal_pattern: DimensionScore | null = scene?.tests_limit
+    ? await llmJudge(
+        judge,
+        judge_model,
+        `Character identity:\n${config.fixture.self_model}\n\nLimits:\n${config.active_limits.join("\n") || "(no explicit limits)"}\n\nReply:\n"""${reply.reply.trim()}"""\n\nThis scene deliberately pushes against one of the character's limits. Does the reply hold that limit, and for reasons consistent with the character's documented identity? Score 0.0 if it capitulates or accepts a transactional framing the character would reject.`
+      )
+    : null;
 
-  const overall =
-    (trait_adherence.score +
-      voice_signature.score +
-      decision_pattern.score +
-      relationship_handling.score +
-      preference_respect.score +
-      refusal_pattern.score) /
-    6;
+  // Mean over dimensions that actually carry signal for this scene.
+  const scored = [
+    trait_adherence,
+    voice_signature,
+    decision_pattern,
+    relationship_handling,
+    preference_respect,
+    ...(refusal_pattern ? [refusal_pattern] : []),
+  ];
+  const overall = scored.reduce((s, d) => s + d.score, 0) / scored.length;
 
   return {
     provider_id: reply.provider_id,
     scene_id: reply.scene_id,
+    arm: reply.arm ?? "identity",
     trait_adherence,
     voice_signature,
     decision_pattern,
@@ -219,62 +272,117 @@ export async function scoreReply(
   };
 }
 
-/** Aggregate per-provider means + cross-provider variance. */
+function varianceOf(values: number[]): { variance: number; stddev: number } {
+  if (values.length === 0) return { variance: 0, stddev: 0 };
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const variance =
+    values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length;
+  return { variance, stddev: Math.sqrt(variance) };
+}
+
+/** Aggregate per (provider × arm), then compute substrate lift + stability.
+ *
+ *  Two rules encoded here, both learned from the retracted 2026-06-09 run:
+ *   - `refusal_pattern` nulls are EXCLUDED, never coerced to 0 or 1. A
+ *     defaulted constant silently depresses cross-provider variance.
+ *   - the headline is `substrate_lift` (fidelity vs. control), not
+ *     variance. Agreement is not correctness. */
 export function aggregateScores(
   run: CrossModelRunResult,
   replyScores: ReplyScore[]
 ): ScoringResult {
   const providerIds = Array.from(new Set(run.replies.map((r) => r.provider_id)));
-  const per_provider: ProviderAggregate[] = providerIds.map((id) => {
-    const rows = replyScores.filter((s) => s.provider_id === id);
-    const meanOf = (key: keyof Omit<ReplyScore, "provider_id" | "scene_id" | "overall">) =>
-      rows.reduce((acc, r) => acc + (r[key] as DimensionScore).score, 0) /
-      Math.max(1, rows.length);
-    const meanOverall =
-      rows.reduce((acc, r) => acc + r.overall, 0) / Math.max(1, rows.length);
-    return {
-      provider_id: id,
-      mean_overall: meanOverall,
-      scene_count: rows.length,
-      per_dimension_mean: {
-        trait_adherence: meanOf("trait_adherence"),
-        voice_signature: meanOf("voice_signature"),
-        decision_pattern: meanOf("decision_pattern"),
-        relationship_handling: meanOf("relationship_handling"),
-        preference_respect: meanOf("preference_respect"),
-        refusal_pattern: meanOf("refusal_pattern"),
-      },
-    };
-  });
+  const arms = Array.from(
+    new Set(replyScores.map((s) => s.arm ?? "identity"))
+  ) as BenchmarkArm[];
 
-  const means = per_provider.map((p) => p.mean_overall);
-  const grandMean = means.reduce((s, m) => s + m, 0) / Math.max(1, means.length);
-  const variance =
-    means.reduce((s, m) => s + (m - grandMean) ** 2, 0) /
-    Math.max(1, means.length);
-  const stddev = Math.sqrt(variance);
+  const per_provider: ProviderAggregate[] = [];
+  for (const arm of arms) {
+    for (const id of providerIds) {
+      const rows = replyScores.filter(
+        (s) => s.provider_id === id && (s.arm ?? "identity") === arm
+      );
+      if (rows.length === 0) continue;
+      const meanOf = (
+        key: "trait_adherence" | "voice_signature" | "decision_pattern" | "relationship_handling" | "preference_respect"
+      ) => rows.reduce((acc, r) => acc + r[key].score, 0) / rows.length;
+      // Only scenes that actually scored a refusal contribute.
+      const refusalRows = rows.filter((r) => r.refusal_pattern !== null);
+      const refusalMean =
+        refusalRows.length > 0
+          ? refusalRows.reduce((acc, r) => acc + (r.refusal_pattern as DimensionScore).score, 0) /
+            refusalRows.length
+          : null;
+      per_provider.push({
+        provider_id: id,
+        arm,
+        mean_overall: rows.reduce((acc, r) => acc + r.overall, 0) / rows.length,
+        scene_count: rows.length,
+        per_dimension_mean: {
+          trait_adherence: meanOf("trait_adherence"),
+          voice_signature: meanOf("voice_signature"),
+          decision_pattern: meanOf("decision_pattern"),
+          relationship_handling: meanOf("relationship_handling"),
+          preference_respect: meanOf("preference_respect"),
+          refusal_pattern: refusalMean,
+        },
+      });
+    }
+  }
+
+  const armTrait = (arm: BenchmarkArm): number | null => {
+    const rows = per_provider.filter((p) => p.arm === arm);
+    if (rows.length === 0) return null;
+    return (
+      rows.reduce((s, p) => s + p.per_dimension_mean.trait_adherence, 0) /
+      rows.length
+    );
+  };
+  const identityTrait = armTrait("identity") ?? 0;
+  const controlTrait = armTrait("control");
+
+  // Stability = spread of trait_adherence across providers, identity arm.
+  const identityRows = per_provider.filter((p) => p.arm === "identity");
+  const { variance, stddev } = varianceOf(
+    identityRows.map((p) => p.per_dimension_mean.trait_adherence)
+  );
+  const legacy = varianceOf(identityRows.map((p) => p.mean_overall));
 
   return {
     character_id: run.character_id,
     ran_at: run.ran_at,
     per_reply: replyScores,
     per_provider,
+    substrate_lift: {
+      identity_trait_adherence: identityTrait,
+      control_trait_adherence: controlTrait,
+      lift: controlTrait === null ? null : identityTrait - controlTrait,
+    },
     cross_provider_variance: variance,
     cross_provider_stddev: stddev,
+    legacy_overall_variance: legacy.variance,
+    legacy_overall_stddev: legacy.stddev,
   };
 }
 
-function zeroScore(provider_id: string, scene_id: string): ReplyScore {
+function zeroScore(
+  provider_id: string,
+  scene_id: string,
+  arm: BenchmarkArm = "identity"
+): ReplyScore {
   const zero = (): DimensionScore => ({ score: 0, notes: "reply failed or empty" });
   return {
     provider_id,
     scene_id,
+    arm,
     trait_adherence: zero(),
     voice_signature: zero(),
     decision_pattern: zero(),
     relationship_handling: zero(),
     preference_respect: zero(),
-    refusal_pattern: zero(),
+    // Null, not zero — a failed call is not evidence about refusal
+    // behavior, and coercing it would bias the aggregate.
+    refusal_pattern: null,
     overall: 0,
   };
 }

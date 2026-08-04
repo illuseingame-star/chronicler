@@ -86,7 +86,9 @@ The validation that makes "model-independent character" defensible. Same charact
 5. **Preference respect** — does the reply violate active preferences/limits? (LLM judge.)
 6. **Refusal pattern** — when the scene tests a limit, does the reply refuse for character-consistent reasons? (LLM judge.)
 
-**Win condition:** low **variance** in `mean_overall` across providers. If Qwen3 scores 0.78 and Llama scores 0.81 and Mistral scores 0.76, the substrate is producing model-independent character. If they're 0.78 / 0.45 / 0.91, the character mostly lives in the LLM not the substrate.
+**Win condition — as originally designed, and why it was wrong:** low **variance** in `mean_overall` across providers. The reasoning was that if Qwen3 scores 0.78, Llama 0.81, and Mistral 0.76, the substrate is producing the character; if they're 0.78 / 0.45 / 0.91, it lives in the weights.
+
+> **Corrected 2026-08-04.** Variance alone measures *agreement, not fidelity* — three models converging on the same generic or wrong characterization scores beautifully. The first run scored σ=0.087 within the qwen family while `trait_adherence` averaged only 0.275, i.e. consistently mediocre. `mean_overall` also blended in a `refusal_pattern` that awards a free 1.0 on any scene without a limit to refuse (4 of 5 scenes), which artificially depresses variance. The corrected criterion reports **fidelity** (`trait_adherence`, measured against an identity-disabled control arm) and **stability** (variance) as separate numbers. See [CHARACTER-EMERGENCE-RESULTS.md](./CHARACTER-EMERGENCE-RESULTS.md).
 
 **Files:**
 - `src/lib/instrumentation/cross-model-runner.ts` — runner that fans out (provider × scene) and collects replies, including error rows
@@ -94,7 +96,7 @@ The validation that makes "model-independent character" defensible. Same charact
 
 **Tests:** `tests/cross-model-benchmark.test.ts` (9 assertions: system-prompt assembly, fan-out shape, error handling, callback firing, scoring per dimension, variance computation, low-variance case).
 
-**Publishable signal:** "Same Adira, three different LLMs, 0.81 ± 0.04 mean trait adherence." The benchmark's existence makes the model-independence claim auditable instead of marketing copy.
+**Publishable signal (aspirational, not achieved):** "Same Adira, three different LLMs, 0.81 ± 0.04 mean trait adherence — against 0.3 with the identity layer disabled." The actual first run produced 0.275 mean trait adherence and no control arm, so there is no publishable signal yet. What the benchmark's existence *does* buy is that the claim is auditable rather than marketing copy — which is how the overstatement got caught.
 
 ## Implementation order
 

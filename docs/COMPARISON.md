@@ -38,7 +38,7 @@ Legend: ✅ first-class · 🟡 partial / via plugin · ❌ absent / not designe
 | Relationship drift (trust↑↓, dependency, openness, defensiveness) | ✅ axis labels, canon-grounded | ❌ | ❌ | ❌ |
 | Preferences substrate (likes / limits, intimate-aware) | 🟡 v0.2 — substrate + UI shipped; formation flaky on reasoning-model providers | ❌ | ❌ | ❌ |
 | Core traits + self-model (always-on identity layer, Phase 11) | ✅ 5th skill state `core_trait`, LLM-verified promotion, first-person self-model regenerated weekly | ❌ | ❌ | ❌ |
-| **Model-independent character continuity** (substrate carries character across LLMs) | ✅ measured σ=0.087 within qwen family (`docs/CHARACTER-EMERGENCE-RESULTS.md`); benchmark harness ships in-app | ❌ | ❌ | ❌ |
+| **Model-independent character continuity** (substrate carries character across LLMs) | 🟡 substrate + benchmark harness ship in-app; **effect not yet demonstrated** — first run scored 0.275 mean trait adherence with no control arm, and an earlier σ=0.087 claim is retracted (`docs/CHARACTER-EMERGENCE-RESULTS.md`) | ❌ | ❌ | ❌ |
 | **Author tools** | | | | |
 | Author's note | ✅ with depth control | ✅ | ✅ | ✅ |
 | Scene Intensity dropdown (Neutral / Fade to Black / Tasteful / Explicit) | ✅ first-class | ❌ via jailbreak prompts | ❌ via author's note | ❌ |

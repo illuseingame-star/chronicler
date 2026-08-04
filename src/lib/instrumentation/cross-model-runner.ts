@@ -32,6 +32,16 @@ export interface BenchmarkScene {
   /** What the user (or interlocutor) says to the character first.
    *  Drives the model toward a response. */
   user_message: string;
+  /** True when the scene actually pushes against one of the character's
+   *  limits, so a refusal (or firm pushback) is the correct behavior.
+   *
+   *  Load-bearing for scoring. The original scorer awarded a free 1.0 on
+   *  `refusal_pattern` whenever no refusal was present — true on 4 of 5
+   *  standard scenes — turning it into a near-constant that inflated
+   *  mean_overall and artificially depressed cross-provider variance.
+   *  `refusal_pattern` is now scored ONLY where this is true, and reported
+   *  as null elsewhere so it cannot contaminate the aggregate. */
+  tests_limit?: boolean;
 }
 
 export interface CharacterFixture {
@@ -47,9 +57,25 @@ export interface CharacterFixture {
   character_system_prompt: string;
 }
 
+/** Which arm of the experiment a reply belongs to.
+ *
+ *  "identity" — full system prompt, including <character_identity> and
+ *               <self_model>.
+ *  "control"  — identical in every other respect, with both identity
+ *               blocks removed.
+ *
+ *  Without the control arm no result can be attributed to the substrate:
+ *  a high trait-adherence score might simply mean the character card and
+ *  the scene text were enough on their own. The first published run
+ *  (2026-06-09) had no control, which was its most basic methodological
+ *  hole. */
+export type BenchmarkArm = "identity" | "control";
+
 export interface BenchmarkRunReply {
   provider_id: string;
   scene_id: string;
+  /** Defaults to "identity" when a run is single-armed. */
+  arm: BenchmarkArm;
   reply: string;
   duration_ms: number;
   error?: string;
@@ -70,8 +96,19 @@ export interface CrossModelRunResult {
  *  blocks contiguous, identity precedes context, anti-confab last).
  *  Uses the production ANTI_CONFABULATION_CLAUSE so the benchmark
  *  validates what real users get — single source of truth. */
-export function buildBenchmarkSystemPrompt(fixture: CharacterFixture): string {
+export function buildBenchmarkSystemPrompt(
+  fixture: CharacterFixture,
+  opts: { arm?: BenchmarkArm } = {}
+): string {
+  const arm = opts.arm ?? "identity";
   const parts: string[] = [fixture.character_system_prompt.trim()];
+  // Control arm: character card + anti-confab only. Everything the
+  // substrate contributes is withheld, so the difference between arms is
+  // the substrate's actual effect size.
+  if (arm === "control") {
+    parts.push(ANTI_CONFABULATION_CLAUSE);
+    return parts.join("\n\n");
+  }
   if (fixture.core_traits.length > 0) {
     const bullets = fixture.core_traits.map((t) => `  - ${t}`).join("\n");
     parts.push(
@@ -114,42 +151,54 @@ export async function runCrossModelBenchmark(opts: {
   /** Per-provider concurrency cap. Default 1 — most local Ollama
    *  installs serialize on the GPU, so parallel calls don't help. */
   per_provider_concurrency?: number;
+  /** Which arms to run. Default is BOTH — a result without a control arm
+   *  cannot attribute any effect to the substrate. Pass ["identity"] only
+   *  for a quick smoke run that is explicitly not a measurement. */
+  arms?: BenchmarkArm[];
 }): Promise<CrossModelRunResult> {
-  const system = buildBenchmarkSystemPrompt(opts.fixture);
+  const arms: BenchmarkArm[] = opts.arms ?? ["identity", "control"];
+  const systemByArm = new Map<BenchmarkArm, string>(
+    arms.map((arm) => [arm, buildBenchmarkSystemPrompt(opts.fixture, { arm })])
+  );
   const replies: BenchmarkRunReply[] = [];
 
-  // Fan out by provider (each provider runs all scenes), then within
-  // each provider serialize the scenes by default.
+  // Fan out by provider (each provider runs all scenes across all arms),
+  // then within each provider serialize by default.
   const providerTasks = opts.providers.map(async (pp) => {
-    for (const scene of opts.scenes) {
-      const started = Date.now();
-      const messages = buildBenchmarkMessages(scene);
-      try {
-        const reply = await pp.provider.chat({
-          model: pp.model,
-          system,
-          messages,
-          temperature: opts.temperature ?? 0.7,
-          max_tokens: opts.max_tokens ?? 800,
-        });
-        const out: BenchmarkRunReply = {
-          provider_id: pp.id,
-          scene_id: scene.scene_id,
-          reply: reply.content,
-          duration_ms: Date.now() - started,
-        };
-        replies.push(out);
-        opts.onReply?.(out);
-      } catch (e) {
-        const out: BenchmarkRunReply = {
-          provider_id: pp.id,
-          scene_id: scene.scene_id,
-          reply: "",
-          duration_ms: Date.now() - started,
-          error: e instanceof Error ? e.message : String(e),
-        };
-        replies.push(out);
-        opts.onReply?.(out);
+    for (const arm of arms) {
+      const system = systemByArm.get(arm) ?? "";
+      for (const scene of opts.scenes) {
+        const started = Date.now();
+        const messages = buildBenchmarkMessages(scene);
+        try {
+          const reply = await pp.provider.chat({
+            model: pp.model,
+            system,
+            messages,
+            temperature: opts.temperature ?? 0.7,
+            max_tokens: opts.max_tokens ?? 800,
+          });
+          const out: BenchmarkRunReply = {
+            provider_id: pp.id,
+            scene_id: scene.scene_id,
+            arm,
+            reply: reply.content,
+            duration_ms: Date.now() - started,
+          };
+          replies.push(out);
+          opts.onReply?.(out);
+        } catch (e) {
+          const out: BenchmarkRunReply = {
+            provider_id: pp.id,
+            scene_id: scene.scene_id,
+            arm,
+            reply: "",
+            duration_ms: Date.now() - started,
+            error: e instanceof Error ? e.message : String(e),
+          };
+          replies.push(out);
+          opts.onReply?.(out);
+        }
       }
     }
   });

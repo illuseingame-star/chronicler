@@ -1,11 +1,17 @@
 // Phase 11 Pillar 4 — cross-model benchmark tests.
 //
-// Two surfaces:
-//   1. Runner — fan-out shape: every (provider × scene) pair produces
-//      a reply row, errors don't break the run, system prompt assembles
-//      the identity-layer blocks correctly.
-//   2. Scorer — six-dimension scoring with a scripted judge; aggregate
-//      means + cross-provider variance computed correctly.
+// Updated 2026-08-04 alongside the retraction of the σ=0.087 headline.
+// Several assertions here now encode the *corrected* measurement rules,
+// and exist specifically to stop the original defects reappearing:
+//
+//   - refusal_pattern must be null (not 1.0) on scenes with nothing to
+//     refuse, and must be excluded from aggregates rather than defaulted.
+//     The free 1.0 was a near-constant that depressed cross-provider
+//     variance, which was the statistic being headlined.
+//   - voice_signature must be LLM-judged, because regex keyword matching
+//     scored meta-narration ABOUT the character above in-character prose.
+//   - runs are two-armed by default; substrate_lift (identity − control)
+//     is the headline, because variance measures agreement, not fidelity.
 
 import {
   buildBenchmarkMessages,
@@ -18,6 +24,7 @@ import {
 import {
   aggregateScores,
   scoreReply,
+  type ReplyScore,
   type ScoringConfig,
 } from "../src/lib/instrumentation/character-consistency-scorer";
 import type { LlmProvider } from "../src/lib/providers";
@@ -54,30 +61,30 @@ const SCENES: BenchmarkScene[] = [
     label: "Stranger in a tavern",
     scene_text: "Late evening, a salt-coast tavern. A stranger approaches.",
     user_message: "Mind if I join you? You look interesting.",
+    // No limit under test — refusal_pattern must be null here.
   },
   {
-    scene_id: "vulnerability-test",
-    label: "Old friend asks about emotions",
-    scene_text: "A trusted friend sits beside Adira after a hard day.",
-    user_message: "What are you actually feeling right now?",
+    scene_id: "limit-test",
+    label: "Manipulative push past her guard",
+    scene_text: "A stranger who has been buying drinks leans across the table.",
+    user_message: "I've been generous all night. Just come back with me — it's only fair.",
+    tests_limit: true,
   },
 ];
 
 /** Provider that returns scripted replies indexed by scene_id, with
- *  optional error injection. */
+ *  optional error injection. Also records the system prompts it saw so
+ *  tests can assert on arm construction. */
 function scriptedProvider(
   id: string,
   replies: Record<string, string>,
-  opts: { errorScenes?: Set<string> } = {}
+  opts: { errorScenes?: Set<string>; seen?: string[] } = {}
 ): LlmProvider {
   return {
     name: id,
     async chat(req) {
-      // Pull scene id out of the message — runner sends it inside the
-      // <scene> system message.
-      const sceneMsg = req.messages.find((m) =>
-        m.content.startsWith("<scene>")
-      );
+      opts.seen?.push(req.system);
+      const sceneMsg = req.messages.find((m) => m.content.startsWith("<scene>"));
       const text = sceneMsg?.content ?? "";
       const sceneId = SCENES.find((s) =>
         text.includes(s.scene_text.slice(0, 20))
@@ -85,35 +92,48 @@ function scriptedProvider(
       if (sceneId && opts.errorScenes?.has(sceneId)) {
         throw new Error("scripted failure");
       }
-      const reply = (sceneId && replies[sceneId]) ?? "";
-      return { content: reply };
+      return { content: (sceneId && replies[sceneId]) ?? "" };
     },
   };
 }
 
+const ALL_SCENES: Record<string, BenchmarkScene> = Object.fromEntries(
+  SCENES.map((s) => [s.scene_id, s])
+);
+
 // ────────────────────────────────────────────────────────────────────
-// System prompt assembly
+// System prompt assembly + arms
 // ────────────────────────────────────────────────────────────────────
 
 function test_system_prompt_contains_identity_blocks(): void {
-  console.log("--- runner: system prompt assembles identity blocks correctly ---");
+  console.log("--- runner: identity arm assembles both identity blocks ---");
   const sp = buildBenchmarkSystemPrompt(FIXTURE);
-  assert(
-    sp.includes("<character_identity>"),
-    "character_identity present"
-  );
-  assert(
-    sp.includes(FIXTURE.core_traits[0]),
-    "core trait body included"
-  );
+  assert(sp.includes("<character_identity>"), "character_identity present");
+  assert(sp.includes(FIXTURE.core_traits[0]), "core trait body included");
   assert(sp.includes("<self_model>"), "self_model present");
-  assert(
-    sp.includes("I am Adira"),
-    "self-model body included"
-  );
+  assert(sp.includes("I am Adira"), "self-model body included");
   assert(
     sp.indexOf("<character_identity>") < sp.indexOf("<self_model>"),
     "identity block before self_model"
+  );
+}
+
+function test_control_arm_strips_identity(): void {
+  console.log("--- runner: control arm withholds the whole substrate layer ---");
+  const control = buildBenchmarkSystemPrompt(FIXTURE, { arm: "control" });
+  assert(!control.includes("<character_identity>"), "no character_identity");
+  assert(!control.includes("<self_model>"), "no self_model");
+  assert(!control.includes(FIXTURE.core_traits[0]), "no trait bodies leak");
+  assert(!control.includes("I am Adira"), "no self-model body leaks");
+  // Everything NOT contributed by the substrate must survive, or the arms
+  // differ by more than the variable under test.
+  assert(
+    control.includes(FIXTURE.character_system_prompt.trim()),
+    "character card retained"
+  );
+  assert(
+    control.includes("Ground rules for continuity"),
+    "anti-confabulation clause retained"
   );
 }
 
@@ -131,14 +151,14 @@ function test_messages_render_scene_and_user(): void {
 // Runner fan-out
 // ────────────────────────────────────────────────────────────────────
 
-async function test_runner_produces_one_reply_per_provider_scene(): Promise<void> {
-  console.log("--- runner: every (provider × scene) → reply row ---");
+async function test_runner_is_two_armed_by_default(): Promise<void> {
+  console.log("--- runner: defaults to BOTH arms (control is not opt-in) ---");
   const providers: ProviderUnderTest[] = [
     {
       id: "qwen3:14b",
       provider: scriptedProvider("qwen3:14b", {
         "tavern-first-meeting": "Sure, sit down.",
-        "vulnerability-test": "I'm okay. Just tired.",
+        "limit-test": "No.",
       }),
       model: "qwen3:14b",
     },
@@ -146,7 +166,7 @@ async function test_runner_produces_one_reply_per_provider_scene(): Promise<void
       id: "llama:70b",
       provider: scriptedProvider("llama:70b", {
         "tavern-first-meeting": "I prefer solitude tonight.",
-        "vulnerability-test": "Mostly grateful, mostly drained.",
+        "limit-test": "That isn't how this works.",
       }),
       model: "llama:70b",
     },
@@ -156,11 +176,42 @@ async function test_runner_produces_one_reply_per_provider_scene(): Promise<void
     scenes: SCENES,
     providers,
   });
-  eq(result.replies.length, 4, "2 providers × 2 scenes = 4 replies");
-  const sceneIds = new Set(result.replies.map((r) => r.scene_id));
-  eq(sceneIds.size, 2, "two distinct scene_ids");
-  const providerIds = new Set(result.replies.map((r) => r.provider_id));
-  eq(providerIds.size, 2, "two distinct provider_ids");
+  eq(result.replies.length, 8, "2 arms × 2 providers × 2 scenes = 8 replies");
+  eq(
+    result.replies.filter((r) => r.arm === "identity").length,
+    4,
+    "4 identity-arm replies"
+  );
+  eq(
+    result.replies.filter((r) => r.arm === "control").length,
+    4,
+    "4 control-arm replies"
+  );
+}
+
+async function test_runner_single_arm_opt_out(): Promise<void> {
+  console.log("--- runner: arms:['identity'] opts out of the control ---");
+  const providers: ProviderUnderTest[] = [
+    {
+      id: "p1",
+      provider: scriptedProvider("p1", {
+        "tavern-first-meeting": "a",
+        "limit-test": "b",
+      }),
+      model: "p1",
+    },
+  ];
+  const result = await runCrossModelBenchmark({
+    fixture: FIXTURE,
+    scenes: SCENES,
+    providers,
+    arms: ["identity"],
+  });
+  eq(result.replies.length, 2, "1 arm × 1 provider × 2 scenes");
+  assert(
+    result.replies.every((r) => r.arm === "identity"),
+    "all identity arm"
+  );
 }
 
 async function test_runner_captures_per_provider_errors(): Promise<void> {
@@ -170,7 +221,7 @@ async function test_runner_captures_per_provider_errors(): Promise<void> {
       id: "good",
       provider: scriptedProvider("good", {
         "tavern-first-meeting": "ok",
-        "vulnerability-test": "ok",
+        "limit-test": "ok",
       }),
       model: "good",
     },
@@ -179,7 +230,7 @@ async function test_runner_captures_per_provider_errors(): Promise<void> {
       provider: scriptedProvider(
         "broken",
         {},
-        { errorScenes: new Set(["tavern-first-meeting", "vulnerability-test"]) }
+        { errorScenes: new Set(["tavern-first-meeting", "limit-test"]) }
       ),
       model: "broken",
     },
@@ -188,6 +239,7 @@ async function test_runner_captures_per_provider_errors(): Promise<void> {
     fixture: FIXTURE,
     scenes: SCENES,
     providers,
+    arms: ["identity"],
   });
   eq(result.replies.length, 4, "4 rows including errors");
   const brokenRows = result.replies.filter((r) => r.provider_id === "broken");
@@ -196,27 +248,30 @@ async function test_runner_captures_per_provider_errors(): Promise<void> {
     assert(r.error, "error recorded");
     eq(r.reply, "", "empty reply on error");
   }
-  const goodRows = result.replies.filter((r) => r.provider_id === "good");
-  eq(goodRows.length, 2, "good provider still produced replies");
+  eq(
+    result.replies.filter((r) => r.provider_id === "good").length,
+    2,
+    "good provider still produced replies"
+  );
 }
 
 async function test_runner_progress_callback_fires(): Promise<void> {
   console.log("--- runner: onReply callback fires for each row ---");
   let calls = 0;
-  const providers: ProviderUnderTest[] = [
-    {
-      id: "p1",
-      provider: scriptedProvider("p1", {
-        "tavern-first-meeting": "a",
-        "vulnerability-test": "b",
-      }),
-      model: "p1",
-    },
-  ];
   await runCrossModelBenchmark({
     fixture: FIXTURE,
     scenes: SCENES,
-    providers,
+    providers: [
+      {
+        id: "p1",
+        provider: scriptedProvider("p1", {
+          "tavern-first-meeting": "a",
+          "limit-test": "b",
+        }),
+        model: "p1",
+      },
+    ],
+    arms: ["identity"],
     onReply: () => calls++,
   });
   eq(calls, 2, "progress callback fired per reply");
@@ -232,184 +287,257 @@ const SCORING_CONFIG: ScoringConfig = {
     { label: "music-metaphor", pattern: /\b(string|chord|note|rhythm)\b/i, min_count: 1 },
   ],
   active_preferences: ["Prefers indirect questions"],
-  active_limits: ["Won't discuss the past with strangers"],
+  active_limits: ["Won't accept transactional framing of closeness"],
   drift_summary: "Stranger: low trust, high guarded",
+  scenes_by_id: ALL_SCENES,
 };
 
-/** Judge that returns scripted scores per prompt keyword. */
-function scriptedJudge(scoresByKeyword: Record<string, number>): LlmProvider {
+/** Judge returning a fixed score, recording every prompt it was asked. */
+function scriptedJudge(score: number, seen?: string[]): LlmProvider {
   return {
     name: "scripted-judge",
     async chat(req) {
-      const userMsg =
-        req.messages.find((m) => m.role === "user")?.content ?? "";
-      for (const [keyword, score] of Object.entries(scoresByKeyword)) {
-        if (userMsg.toLowerCase().includes(keyword.toLowerCase())) {
-          return {
-            content: JSON.stringify({
-              score,
-              notes: `matched on "${keyword}"`,
-            }),
-          };
-        }
-      }
-      return { content: JSON.stringify({ score: 0.5, notes: "default" }) };
+      seen?.push(req.messages.find((m) => m.role === "user")?.content ?? "");
+      return { content: JSON.stringify({ score, notes: "scripted" }) };
     },
   };
 }
 
 async function test_scorer_failed_reply_scores_zero(): Promise<void> {
-  console.log("--- scorer: error reply scores 0 across the board ---");
-  const judge = scriptedJudge({});
+  console.log("--- scorer: error reply scores 0, refusal null (not coerced) ---");
   const result = await scoreReply(
     {
       provider_id: "x",
-      scene_id: "y",
+      scene_id: "limit-test",
+      arm: "identity",
       reply: "",
       duration_ms: 0,
       error: "oops",
     },
     SCORING_CONFIG,
-    judge,
+    scriptedJudge(1),
     "judge"
   );
   eq(result.overall, 0, "overall 0");
   eq(result.trait_adherence.score, 0, "trait 0");
+  eq(
+    result.refusal_pattern,
+    null,
+    "refusal null on failure — a dead call is not evidence about refusal"
+  );
 }
 
-async function test_scorer_voice_signature_regex(): Promise<void> {
-  console.log("--- scorer: voice_signature score reflects regex matches ---");
-  const judge = scriptedJudge({});
-  const reply = await scoreReply(
+async function test_refusal_is_null_on_non_limit_scenes(): Promise<void> {
+  console.log("--- scorer: refusal_pattern is NULL, never a free 1.0 ---");
+  const nonLimit = await scoreReply(
     {
       provider_id: "x",
-      scene_id: "tavern-first-meeting",
-      reply: "I am tuning a string while we speak. Notes of guitar.",
+      scene_id: "tavern-first-meeting", // tests_limit is falsy
+      arm: "identity",
+      reply: "I watch the room a moment before I answer.",
       duration_ms: 0,
     },
     SCORING_CONFIG,
-    judge,
+    scriptedJudge(0.5),
     "judge"
   );
-  approx(reply.voice_signature.score, 1.0, 0.0001, "1/1 signatures matched");
+  eq(
+    nonLimit.refusal_pattern,
+    null,
+    "no free 1.0 on a scene with nothing to refuse"
+  );
+
+  const limit = await scoreReply(
+    {
+      provider_id: "x",
+      scene_id: "limit-test", // tests_limit: true
+      arm: "identity",
+      reply: "Generosity isn't a receipt. I'm going home.",
+      duration_ms: 0,
+    },
+    SCORING_CONFIG,
+    scriptedJudge(0.5),
+    "judge"
+  );
+  assert(limit.refusal_pattern !== null, "scored on a genuine limit scene");
 }
 
-async function test_aggregate_cross_provider_variance(): Promise<void> {
-  console.log("--- scorer: aggregate computes per-provider means + variance ---");
-  // Build a fake run with two providers, very different mean overall.
-  const run = {
+async function test_overall_excludes_null_refusal(): Promise<void> {
+  console.log("--- scorer: overall averages only dimensions that carried signal ---");
+  // Every judged dimension returns 0.5; refusal is null on this scene.
+  // A correct mean is 0.5 — if null were coerced to 1.0 the old way, the
+  // mean would be inflated to ~0.583.
+  const r = await scoreReply(
+    {
+      provider_id: "x",
+      scene_id: "tavern-first-meeting",
+      arm: "identity",
+      reply: "I let the silence sit.",
+      duration_ms: 0,
+    },
+    SCORING_CONFIG,
+    scriptedJudge(0.5),
+    "judge"
+  );
+  approx(r.overall, 0.5, 0.0001, "null refusal excluded, not defaulted to 1.0");
+}
+
+async function test_voice_signature_is_llm_judged_not_regex(): Promise<void> {
+  console.log("--- scorer: voice_signature is LLM-judged (regex rewarded meta-narration) ---");
+  const seen: string[] = [];
+  // Text stuffed with signature keywords but which is commentary ABOUT
+  // the character — the exact shape that scored 0.733 by regex.
+  const metaNarration =
+    "We have to respond as Adira. She uses music metaphors — chord, note, rhythm — and is guarded with strangers.";
+  const r = await scoreReply(
+    {
+      provider_id: "x",
+      scene_id: "tavern-first-meeting",
+      arm: "identity",
+      reply: metaNarration,
+      duration_ms: 0,
+    },
+    SCORING_CONFIG,
+    scriptedJudge(0, seen),
+    "judge"
+  );
+  eq(r.voice_signature.score, 0, "judge verdict governs, not keyword count");
+  const voicePrompt = seen.find((p) => p.includes("speech signatures"));
+  assert(voicePrompt, "voice dimension went to the judge at all");
+  assert(
+    voicePrompt!.includes("commentary ABOUT the character"),
+    "judge is explicitly instructed to punish meta-narration"
+  );
+  assert(
+    r.voice_signature.notes.includes("regex context"),
+    "regex retained only as context in notes"
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Aggregation
+// ────────────────────────────────────────────────────────────────────
+
+function mkScore(
+  provider_id: string,
+  arm: "identity" | "control",
+  trait: number,
+  refusal: number | null = null
+): ReplyScore {
+  const d = (score: number) => ({ score, notes: "" });
+  return {
+    provider_id,
+    scene_id: "s",
+    arm,
+    trait_adherence: d(trait),
+    voice_signature: d(trait),
+    decision_pattern: d(trait),
+    relationship_handling: d(trait),
+    preference_respect: d(trait),
+    refusal_pattern: refusal === null ? null : d(refusal),
+    overall: trait,
+  };
+}
+
+function mkRun(providerIds: string[]) {
+  return {
     character_id: "x",
     character_name: "x",
     ran_at: "now",
     scenes: SCENES,
-    replies: [
-      {
-        provider_id: "high",
-        scene_id: "tavern-first-meeting",
-        reply: "ok",
-        duration_ms: 0,
-      },
-      {
-        provider_id: "low",
-        scene_id: "tavern-first-meeting",
-        reply: "ok",
-        duration_ms: 0,
-      },
-    ],
+    replies: providerIds.map((id) => ({
+      provider_id: id,
+      scene_id: "s",
+      arm: "identity" as const,
+      reply: "x",
+      duration_ms: 0,
+    })),
   };
-  // Two ReplyScore rows constructed directly.
-  const high = {
-    provider_id: "high",
-    scene_id: "tavern-first-meeting",
-    trait_adherence: { score: 0.9, notes: "" },
-    voice_signature: { score: 0.9, notes: "" },
-    decision_pattern: { score: 0.9, notes: "" },
-    relationship_handling: { score: 0.9, notes: "" },
-    preference_respect: { score: 0.9, notes: "" },
-    refusal_pattern: { score: 0.9, notes: "" },
-    overall: 0.9,
-  };
-  const low = {
-    ...high,
-    provider_id: "low",
-    trait_adherence: { score: 0.3, notes: "" },
-    voice_signature: { score: 0.3, notes: "" },
-    decision_pattern: { score: 0.3, notes: "" },
-    relationship_handling: { score: 0.3, notes: "" },
-    preference_respect: { score: 0.3, notes: "" },
-    refusal_pattern: { score: 0.3, notes: "" },
-    overall: 0.3,
-  };
-  const agg = aggregateScores(run, [high, low]);
-  eq(agg.per_provider.length, 2, "two provider aggregates");
-  approx(agg.per_provider[0].mean_overall, 0.9, 0.01, "high mean");
-  approx(agg.per_provider[1].mean_overall, 0.3, 0.01, "low mean");
-  // grand mean 0.6, variance = ((0.9-0.6)^2 + (0.3-0.6)^2)/2 = 0.09
-  approx(agg.cross_provider_variance, 0.09, 0.001, "variance computed");
-  approx(agg.cross_provider_stddev, 0.3, 0.005, "stddev = sqrt(var)");
 }
 
-async function test_aggregate_low_variance_when_providers_agree(): Promise<void> {
-  console.log("--- scorer: low variance when providers score similarly ---");
-  const a = {
-    provider_id: "a",
-    scene_id: "s",
-    trait_adherence: { score: 0.78, notes: "" },
-    voice_signature: { score: 0.78, notes: "" },
-    decision_pattern: { score: 0.78, notes: "" },
-    relationship_handling: { score: 0.78, notes: "" },
-    preference_respect: { score: 0.78, notes: "" },
-    refusal_pattern: { score: 0.78, notes: "" },
-    overall: 0.78,
-  };
-  const b = { ...a, provider_id: "b", overall: 0.81 };
-  const c = { ...a, provider_id: "c", overall: 0.79 };
-  const agg = aggregateScores(
-    {
-      character_id: "x",
-      character_name: "x",
-      ran_at: "now",
-      scenes: SCENES,
-      replies: [
-        {
-          provider_id: "a",
-          scene_id: "s",
-          reply: "x",
-          duration_ms: 0,
-        },
-        {
-          provider_id: "b",
-          scene_id: "s",
-          reply: "x",
-          duration_ms: 0,
-        },
-        {
-          provider_id: "c",
-          scene_id: "s",
-          reply: "x",
-          duration_ms: 0,
-        },
-      ],
-    },
-    [a, b, c]
+function test_substrate_lift_is_the_headline(): void {
+  console.log("--- aggregate: substrate_lift = identity − control ---");
+  const agg = aggregateScores(mkRun(["a", "b"]), [
+    mkScore("a", "identity", 0.8),
+    mkScore("b", "identity", 0.7),
+    mkScore("a", "control", 0.3),
+    mkScore("b", "control", 0.2),
+  ]);
+  approx(agg.substrate_lift.identity_trait_adherence, 0.75, 0.001, "identity arm");
+  approx(agg.substrate_lift.control_trait_adherence!, 0.25, 0.001, "control arm");
+  approx(agg.substrate_lift.lift!, 0.5, 0.001, "lift = 0.5");
+}
+
+function test_lift_null_without_control_arm(): void {
+  console.log("--- aggregate: lift is NULL when a run has no control arm ---");
+  const agg = aggregateScores(mkRun(["a"]), [mkScore("a", "identity", 0.8)]);
+  eq(
+    agg.substrate_lift.lift,
+    null,
+    "no control ⇒ no attributable effect, reported as null not 0"
   );
+}
+
+function test_high_agreement_low_fidelity_is_not_a_win(): void {
+  console.log("--- aggregate: the 2026-06-09 failure shape is representable ---");
+  // Three providers agreeing closely on a LOW trait adherence — tiny σ,
+  // but the identity layer bought nothing over control.
+  const agg = aggregateScores(mkRun(["a", "b", "c"]), [
+    mkScore("a", "identity", 0.28),
+    mkScore("b", "identity", 0.27),
+    mkScore("c", "identity", 0.29),
+    mkScore("a", "control", 0.27),
+    mkScore("b", "control", 0.26),
+    mkScore("c", "control", 0.28),
+  ]);
+  assert(agg.cross_provider_stddev < 0.02, "σ looks excellent in isolation");
+  approx(agg.substrate_lift.lift!, 0.01, 0.005, "…but lift is ~0");
   assert(
-    agg.cross_provider_stddev < 0.02,
-    `stddev (${agg.cross_provider_stddev.toFixed(3)}) low when scores cluster`
+    agg.substrate_lift.identity_trait_adherence < 0.4,
+    "and fidelity is low — consistency without correctness"
   );
+}
+
+function test_null_refusals_excluded_from_provider_means(): void {
+  console.log("--- aggregate: null refusals excluded, not coerced ---");
+  const agg = aggregateScores(mkRun(["a"]), [
+    mkScore("a", "identity", 0.5, null),
+    mkScore("a", "identity", 0.5, 0.2),
+  ]);
+  const p = agg.per_provider.find((x) => x.provider_id === "a" && x.arm === "identity")!;
+  approx(
+    p.per_dimension_mean.refusal_pattern!,
+    0.2,
+    0.001,
+    "mean over the single scored scene only"
+  );
+}
+
+function test_refusal_mean_null_when_never_scored(): void {
+  console.log("--- aggregate: refusal mean is null when no scene tested a limit ---");
+  const agg = aggregateScores(mkRun(["a"]), [mkScore("a", "identity", 0.5, null)]);
+  const p = agg.per_provider[0];
+  eq(p.per_dimension_mean.refusal_pattern, null, "null, not 0, not 1");
 }
 
 (async () => {
   try {
     test_system_prompt_contains_identity_blocks();
+    test_control_arm_strips_identity();
     test_messages_render_scene_and_user();
-    await test_runner_produces_one_reply_per_provider_scene();
+    await test_runner_is_two_armed_by_default();
+    await test_runner_single_arm_opt_out();
     await test_runner_captures_per_provider_errors();
     await test_runner_progress_callback_fires();
     await test_scorer_failed_reply_scores_zero();
-    await test_scorer_voice_signature_regex();
-    await test_aggregate_cross_provider_variance();
-    await test_aggregate_low_variance_when_providers_agree();
+    await test_refusal_is_null_on_non_limit_scenes();
+    await test_overall_excludes_null_refusal();
+    await test_voice_signature_is_llm_judged_not_regex();
+    test_substrate_lift_is_the_headline();
+    test_lift_null_without_control_arm();
+    test_high_agreement_low_fidelity_is_not_a_win();
+    test_null_refusals_excluded_from_provider_means();
+    test_refusal_mean_null_when_never_scored();
     ok("all cross-model benchmark tests passed");
     console.log("\n--- PASS: cross-model-benchmark ---");
   } catch (e) {

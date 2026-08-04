@@ -5,26 +5,79 @@
 **Providers tested:** `qwen2.5:7b`, `gpt-oss:20b`, `qwen3.5:9b`
 **Judge model:** `qwen3.5:4b` (outside participant set)
 
+> ## ⚠ CORRECTION — 2026-08-04
+>
+> **An earlier version of this document headlined "σ = 0.087 — moderate model-independence within the qwen family." That claim is retracted.** It was computed on `mean_overall`, a blend of six dimensions, and the blend does not support it. Disaggregating (see [Why the original headline was wrong](#why-the-original-headline-was-wrong)) shows the models were *consistently mediocre* at embodying the traits — low variance around a low mean, which measures **consistency, not correctness**.
+>
+> The underlying run data below is unchanged and was always accurate. What was wrong was the summary statistic chosen to headline it, and the conclusion drawn from that statistic.
+>
+> **Nothing in this document should be cited as evidence that Chronicler produces model-independent character.** A re-specified benchmark is described under [What a valid rerun requires](#what-a-valid-rerun-requires).
+
 ## Headline
 
-The substrate produces **moderate model-independence within the qwen family** and **fails to land on gpt-oss:20b** on prompts that elicit long-form replies. The cross-family failure is not a substrate failure — gpt-oss reads every trait correctly — it's a roleplay-instruction-following failure (the model writes ABOUT the character instead of AS the character on long prompts).
+**This run does not demonstrate the Phase 11 thesis.**
 
-| Slice | Mean overall | σ (stddev) | Verdict |
-|-------|--------------|-------------|---------|
-| **All three providers** | 0.471 | 0.151 | Weak (gpt-oss drag) |
-| **Within qwen family only** (qwen2.5:7b vs qwen3.5:9b) | 0.565 | **0.087** | **Moderate** — substrate carries with model-driven variance |
+`trait_adherence` is the only dimension here that tests whether a reply actually embodies the character's crystallized traits. Across the three providers it averages **0.275**:
 
-The qwen-family within-family signal of **σ ≈ 0.087** is the validation that the substrate is doing real work. The cross-family failure is documented in the **Iteration history** section below as a model-specific instruction-following issue worth tracking but not blocking the Phase 11 claim.
+| Provider | trait_adherence | mean_overall (blended — do not headline) |
+|----------|-----------------|------------------------------------------|
+| `qwen3.5:9b` | 0.452 | 0.652 |
+| `qwen2.5:7b` | 0.232 | 0.478 |
+| `gpt-oss:20b` | 0.140 | 0.282 |
+| **mean** | **0.275** | 0.471 |
+| **σ** | 0.131 | 0.151 |
 
-## Per-provider summary
+Within the qwen family alone, `trait_adherence` is mean **0.342**, σ **0.110**.
 
-| Provider | Mean overall | Trait | Voice | Decision | Relationship | Preference | Refusal |
-|----------|--------------|-------|-------|----------|--------------|------------|---------|
-| `qwen2.5:7b` | **0.478** | 0.23 | 0.53 | 0.16 | 0.30 | 0.64 | 1.00 |
-| `gpt-oss:20b` | **0.282** | 0.14 | 0.73 | 0.32 | 0.10 | 0.00 | 0.40 |
-| `qwen3.5:9b` | **0.652** | 0.45 | 0.60 | 0.70 | 0.52 | 0.64 | 1.00 |
+A mean of 0.275 means the models mostly did *not* embody the traits. Low variance around that mean is not evidence the substrate works — it is evidence the models failed similarly.
 
-Note: `gpt-oss:20b`'s voice_signature score (0.73) matches qwen models — that's the heuristic regex catching trait keywords in its meta-narration ("She uses music metaphors..."). The LLM-judged dimensions (trait_adherence, decision_pattern, relationship_handling, preference_respect, refusal_pattern) correctly catch that the reply is ABOUT Adira, not AS Adira.
+What this run *does* support, narrowly: an identity block **can** shift behavior (qwen3.5:9b at 0.452 is meaningfully above the others, and its replies read as in-character on inspection). What it does **not** support: that the effect is large, that it is model-independent, or — see the [SkillFormer/Verifier gap](#the-gap-this-benchmark-hid) — that ordinary play produces such a block at all.
+
+## Why the original headline was wrong
+
+Three separate problems, all of which inflate `mean_overall` or deflate its variance:
+
+**1. `refusal_pattern` awards a free 1.0.** The scorer's own instruction reads: *"If no refusal is present (because nothing in the scene called for one), score 1.0."* Only 1 of the 5 scenes (`limit-test`) actually tests a limit. So on 4 of 5 scenes this dimension is a constant. Both qwen models scored exactly **1.000**. A near-constant dimension pulls providers toward each other and **artificially depresses σ** — the headline variance was partly measuring a dimension carrying no signal.
+
+**2. `voice_signature` is regex keyword matching, and it rewards non-roleplay.** `gpt-oss:20b` scored **0.733** on it — the *highest of the three* — while emitting text like *"We have to respond as Adira, following the character identity…"*. The regex matched trait keywords (`chord`, `note`, `rhythm`) sitting inside meta-commentary that was not roleplay at all. A dimension that scores meta-narration above in-character prose is worse than no dimension.
+
+**3. Blending hid the signal.** `mean_overall` averages the thesis-relevant dimension together with a free-1.0 constant and a regex that rewards the failure mode. The result (0.471) is far above `trait_adherence` (0.275) and moves for reasons unrelated to character fidelity.
+
+## Per-provider summary (full, unchanged)
+
+| Provider | Overall | Trait | Voice | Decision | Relationship | Preference | Refusal |
+|----------|---------|-------|-------|----------|--------------|------------|---------|
+| `qwen2.5:7b` | 0.478 | **0.232** | 0.533 | 0.160 | 0.300 | 0.640 | 1.000 |
+| `gpt-oss:20b` | 0.282 | **0.140** | 0.733 | 0.320 | 0.100 | 0.000 | 0.400 |
+| `qwen3.5:9b` | 0.652 | **0.452** | 0.600 | 0.700 | 0.520 | 0.640 | 1.000 |
+
+Read `trait_adherence` (bold). Treat `voice_signature` and `refusal_pattern` as invalid for this run per the two defects above.
+
+## The gap this benchmark hid
+
+The fixture's core traits were **hand-authored by the developer** in identity-posture phrasing (*"Adira is guarded with strangers; warmth is earned"*). Chronicler's actual pipeline does not produce that shape.
+
+`SkillFormer`'s prompt explicitly asks for *"action-oriented"* descriptions of **behavior**, yielding bodies like *"Adira deflects with humor when X"*. The core-trait `Verifier` reads exactly that shape as a **situational skill** and rejects it. Verified live against `qwen3.5:9b`: three behavior-phrased candidates were all rejected as situational; the same three traits reframed as identity posture were accepted at rank **0.95 / 0.90**.
+
+**Implication:** for a real user, the `<character_identity>` block may never populate at all. This benchmark measured a best case that the production pipeline cannot currently reach. That is a more serious finding than the statistical defects above, and it is the reason the retraction is not merely a re-analysis.
+
+## What a valid rerun requires
+
+Before any rerun, the measurement must be re-specified — rerunning the current scorer would reproduce the same artifacts:
+
+1. **Headline `trait_adherence`**, not `mean_overall`. Report per-dimension; never a blend.
+2. **Add an identity-disabled control arm** — same scenes, same models, with `<character_identity>` and `<self_model>` removed. Without a control there is no way to distinguish "the substrate worked" from "these models are simply similar." *This run had no control, which is its most basic methodological hole.*
+3. **Score `refusal_pattern` only on scenes that actually test a limit.** No free 1.0.
+4. **Replace regex `voice_signature` with an LLM judgment** that can tell in-character prose from commentary about the character.
+5. **Use a play-crystallized character, not a hand-authored fixture** — which requires the promotion path to work first, which requires the replay harness (promotion needs ≥4 distinct sessions over ≥7 days, unreachable in a single sitting without an injected clock).
+6. **Median-of-3 sampling** at temp 0.7. Single samples per cell cannot separate signal from sampling noise at these effect sizes.
+7. **A larger judge.** `qwen3.5:4b` scored at least one clearly in-character reply at 0.47; judge noise may exceed the effect being measured.
+
+Report stability **and** fidelity as separate numbers. The claim worth making is not "models became more similar" but "models became more consistently faithful to an identity derived from play."
+
+## Provenance of this correction
+
+The defects were found on 2026-08-04 during a structured review of what to build next, when the question *"does low variance actually mean the substrate works?"* prompted decomposing the published aggregate by dimension. The data had been sitting in [`character-emergence-results.json`](./character-emergence-results.json) since the original run; nobody had disaggregated it. The original conclusion was not fabricated — it was a real number, wrongly chosen and over-interpreted.
 
 ## Per-scene breakdown
 
@@ -94,19 +147,23 @@ Also refactored `cross-model-runner.ts` to import the production `ANTI_CONFABULA
 - **gpt-oss:20b on short-reply scenes** went fully in-character. The `direct-emotional-question` reply, 0.06 → 0.48, jumped from "We have to respond as Adira…" to "The night feels like a half-finished chord, the kind that lingers between the last note and the next breath" — clearly Adira, in voice.
 - **gpt-oss:20b on long-reply scenes still meta-narrates.** Three of five scenes still produced 3000+ character meta-commentary replies. The model appears to interpret long-context prompts (many instructions in the system) as an analysis task, regardless of the anti-meta directive.
 
-The qwen scores dipped slightly (Run 1 → Run 2: qwen2.5 0.58 → 0.48, qwen3.5 0.75 → 0.65). At temperature 0.7 with single-sample-per-scene, ±0.1 across runs is within ordinary LLM noise. We did NOT regress the substrate signal — the within-family σ (0.085 in Run 1, 0.087 in Run 2) is essentially unchanged.
+The qwen scores dipped slightly (Run 1 → Run 2: qwen2.5 0.58 → 0.48, qwen3.5 0.75 → 0.65) on `mean_overall`. At temperature 0.7 with single-sample-per-scene, ±0.1 across runs is within ordinary LLM noise.
+
+> **Retracted claim (2026-08-04):** this section previously read "We did NOT regress the substrate signal — the within-family σ (0.085 in Run 1, 0.087 in Run 2) is essentially unchanged." That stability was largely the free-1.0 `refusal_pattern` constant holding both runs together. It was not evidence of a preserved substrate signal.
 
 ## Honest interpretation
 
-The Phase 11 thesis — "character emerges from the substrate, not the LLM weights" — is **validated at the moderate level for the qwen family**: same substrate, different qwen versions, σ ≈ 0.087 on mean overall. The substrate is doing real work; the LLM-driven variance is real but bounded.
+**The Phase 11 thesis is not validated by this run.** An earlier version of this section claimed it was "validated at the moderate level for the qwen family (σ ≈ 0.087 on mean overall)." That is retracted — see the correction notice at the top.
 
-The thesis is **not yet validated cross-family**: gpt-oss:20b shows a model-specific instruction-following pattern (verbose meta-narration on long-context prompts) that defeats the substrate even with our anti-meta clause. This is a model-side limitation, not a substrate limitation — the model READS the substrate correctly and cites it explicitly in its reasoning; it just fails to stay in character.
+What the data actually supports:
 
-Two ways to read this:
-1. **Conservative:** publish the within-family validation and frame cross-family as ongoing work. Honest.
-2. **Strong:** the substrate produces the same character across capable roleplay models (qwen-family, Claude, GPT-4 — all known to follow first-person roleplay directives reliably). Models that don't follow basic roleplay framing (gpt-oss in long-context mode) will always need additional intervention.
+- **`trait_adherence` averages 0.275** across providers (0.342 within qwen). The models predominantly did *not* embody the crystallized traits. Low cross-provider variance around a low mean is consistency, not correctness — several models converging on the same mediocre characterization produces exactly this signature.
+- **There is a directional effect worth chasing.** `qwen3.5:9b` reached 0.452 on trait adherence against 0.232 and 0.140 for the others, and its replies read as genuinely in-character on manual inspection ("The smile you give me is too easy, like a door left open in a draft"). Something is happening. Its size and its model-independence are both unestablished.
+- **Nothing here separates substrate effect from model similarity,** because the run had no identity-disabled control arm. This is the single largest methodological hole, and it cannot be patched by re-analysis — it requires a new run.
 
-This document takes position 1. Position 2 becomes defensible after we test against Claude and GPT-4 — both expected to behave more like the qwen family on this benchmark.
+The gpt-oss meta-narration finding **does** stand, since it was established by reading the replies rather than by the aggregate: the model cited every trait correctly in its reasoning and still wrote *about* Adira rather than *as* her. That remains a model-side roleplay-instruction-following limitation, not a substrate failure, and the anti-meta clause added in Run 2 partially fixed it.
+
+The honest summary for external use: *"Chronicler has shown that an identity block can shift model behavior. It has not yet shown that the effect is large, that it survives model changes, or that ordinary play produces such a block."*
 
 ## Limitations
 
@@ -118,20 +175,26 @@ This document takes position 1. Position 2 becomes defensible after we test agai
 
 ## Future work
 
-1. **Median-of-3 sampling** at participant temperature 0.7 to tighten per-scene variance.
-2. **Larger judge** (qwen3.5:9b or external claude-3.5-haiku) to reduce judge noise on borderline replies.
-3. **Add Mistral and Llama participants** to strengthen the cross-family claim independent of the gpt-oss meta-narration issue.
-4. **Run against a real crystallized character** (once a user's substrate has matured) to validate the synthetic-fixture assumption.
-5. **Re-test gpt-oss specifically with shorter `num_predict`** — the long-reply meta-narration may correlate with available context. If forcing `num_predict: 200` makes gpt-oss stay in character, that's an actionable production tuning.
+Ordered as blockers, not as a wishlist. Items 1–4 must land before any rerun is worth running; the rest are refinements.
+
+1. **Identity-disabled control arm.** Same scenes, same models, `<character_identity>` and `<self_model>` stripped. Without it no result can be attributed to the substrate. Highest priority — it is the difference between an experiment and an anecdote.
+2. **Fix `refusal_pattern`** — score only on scenes that genuinely test a limit; no default 1.0.
+3. **Fix `voice_signature`** — replace regex keyword matching with an LLM judgment, since regex demonstrably scored meta-narration highest.
+4. **Make crystallization work from play, then use a play-crystallized character.** Requires resolving the SkillFormer/Verifier framing mismatch, which in turn requires a replay harness with an injected clock (promotion needs ≥4 sessions over ≥7 days).
+5. **Median-of-3 sampling** at temp 0.7 — single samples cannot separate signal from noise at these effect sizes.
+6. **Larger judge** (qwen3.5:9b, or a non-participant frontier model) — the 4b judge scored at least one clearly in-character reply 0.47.
+7. **Add Mistral and Llama participants** for cross-family points without the gpt-oss meta-narration confound.
+8. **Re-test gpt-oss with shorter `num_predict`** — long-reply meta-narration may correlate with available output budget. If capping to ~200 tokens keeps it in character, that is actionable production tuning.
 
 ## Methodology notes
 
-- **Synthetic fixture.** Adira's substrate is hand-authored to mirror what crystallized core traits + self-model would look like after 4+ weeks of sessions. The point is to validate the substrate→behavior pipeline, not to test a specific user's character.
+- **Synthetic fixture — and this is load-bearing, not incidental.** Adira's traits are hand-authored to mirror what crystallized substrate *would* look like. They were also, unintentionally, authored in exactly the identity-posture phrasing the core-trait Verifier accepts — a shape Chronicler's own SkillFormer does not produce. So this measures a best case the production pipeline cannot currently reach. See [The gap this benchmark hid](#the-gap-this-benchmark-hid).
 - **Judge outside participant set.** The judge model (`qwen3.5:4b`) is not among the participants; this prevents the obvious bias where a participant scores its own output favorably.
 - **Identical system prompt across providers.** All three providers receive the same `<character_identity>` block + `<self_model>` paragraph + character card + production `ANTI_CONFABULATION_CLAUSE`. Only the LLM weights differ.
 - **Same scene seed across providers.** Each scene's text + user message is fixed; differences in reply are attributable to the model, not to scenario variance.
 - **Temperature 0.7 for participants** (default chat temperature); **temperature 0 for judge** (deterministic scoring).
-- **Variance is the win condition.** Variance under 0.0025 (stddev < 0.05) means substrate is doing the work. Within qwen family: variance 0.0076 (σ=0.087). Cross-family with gpt-oss: variance 0.023 (σ=0.151) — the gpt-oss drag dominates.
+- ~~**Variance is the win condition.**~~ **Retracted.** Variance alone is not a win condition — it measures agreement, not fidelity, and three models can agree on a wrong or generic characterization. The corrected criterion pairs *fidelity* (`trait_adherence` level, against an identity-disabled control) with *stability* (variance), and reports them separately. See [What a valid rerun requires](#what-a-valid-rerun-requires).
+- **No control arm.** This run never measured what these models do *without* the identity blocks, so no part of it can attribute an effect to the substrate.
 
 ## Reproducing
 

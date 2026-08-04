@@ -12,6 +12,9 @@ import { useState } from "react";
 
 export interface BenchmarkProviderResult {
   provider_id: string;
+  /** "identity" | "control". Older embedded results predate the control
+   *  arm and omit it; treated as "identity". */
+  arm?: string;
   mean_overall: number;
   scene_count: number;
   per_dimension_mean: {
@@ -20,8 +23,16 @@ export interface BenchmarkProviderResult {
     decision_pattern: number;
     relationship_handling: number;
     preference_respect: number;
-    refusal_pattern: number;
+    /** Null when no scene in this arm tested a limit. */
+    refusal_pattern: number | null;
   };
+}
+
+/** Fidelity against control — the headline. Absent on pre-2026-08-04 runs. */
+export interface BenchmarkSubstrateLift {
+  identity_trait_adherence: number;
+  control_trait_adherence: number | null;
+  lift: number | null;
 }
 
 export interface CrossModelBenchmarkResult {
@@ -34,6 +45,8 @@ export interface CrossModelBenchmarkResult {
   cross_provider_variance: number;
   cross_provider_stddev: number;
   per_provider: BenchmarkProviderResult[];
+  /** Absent on runs published before the control arm existed. */
+  substrate_lift?: BenchmarkSubstrateLift;
 }
 
 interface Props {
@@ -57,9 +70,11 @@ export function CrossModelResultsSection({ result }: Props) {
         </div>
         {result && (
           <span
-            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${verdictStyle(result.cross_provider_stddev)}`}
+            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${verdictStyle(result)}`}
+            title="Mean trait adherence across providers — the dimension that tests whether replies embody the crystallized traits. Cross-provider σ is shown alongside but is not the headline: agreement is not fidelity."
           >
-            σ {result.cross_provider_stddev.toFixed(3)}
+            trait {meanTraitAdherence(result).toFixed(2)} · σ{" "}
+            {result.cross_provider_stddev.toFixed(3)}
           </span>
         )}
       </header>
@@ -86,9 +101,13 @@ function EmptyState() {
         preference respect, and refusal pattern.
       </p>
       <p>
-        Low <span className="text-amber-300 font-mono">σ</span> (cross-provider
-        standard deviation) means the substrate is producing the character;
-        high σ means the LLM weights are. The publishable signal is &lt; 0.05.
+        The number that matters is{" "}
+        <span className="text-amber-300 font-mono">trait adherence</span> — do
+        the replies actually embody the crystallized traits — measured against
+        a control arm with the identity blocks disabled. Cross-provider{" "}
+        <span className="font-mono">σ</span> is reported alongside it, but low
+        σ on its own only means the models agreed, and models can agree on a
+        generic or wrong characterization.
       </p>
       <p className="text-neutral-500 italic">
         No benchmark has been published yet. Run{" "}
@@ -179,14 +198,30 @@ function DimensionTable({ result }: { result: CrossModelBenchmarkResult }) {
         </thead>
         <tbody>
           {result.per_provider.map((p) => (
-            <tr key={p.provider_id} className="text-neutral-300">
-              <td className="text-left text-amber-300 pr-2">{p.provider_id}</td>
+            <tr key={`${p.provider_id}-${p.arm ?? "identity"}`} className="text-neutral-300">
+              <td className="text-left text-amber-300 pr-2">
+                {p.provider_id}
+                {p.arm === "control" && (
+                  <span className="text-neutral-500"> [control]</span>
+                )}
+              </td>
               <td className="text-right px-1.5">{p.per_dimension_mean.trait_adherence.toFixed(2)}</td>
               <td className="text-right px-1.5">{p.per_dimension_mean.voice_signature.toFixed(2)}</td>
               <td className="text-right px-1.5">{p.per_dimension_mean.decision_pattern.toFixed(2)}</td>
               <td className="text-right px-1.5">{p.per_dimension_mean.relationship_handling.toFixed(2)}</td>
               <td className="text-right px-1.5">{p.per_dimension_mean.preference_respect.toFixed(2)}</td>
-              <td className="text-right px-1.5">{p.per_dimension_mean.refusal_pattern.toFixed(2)}</td>
+              <td
+                className="text-right px-1.5"
+                title={
+                  p.per_dimension_mean.refusal_pattern === null
+                    ? "No scene in this arm tested a limit — excluded from the aggregate rather than defaulted to 1.0"
+                    : undefined
+                }
+              >
+                {p.per_dimension_mean.refusal_pattern === null
+                  ? "n/a"
+                  : p.per_dimension_mean.refusal_pattern.toFixed(2)}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -195,23 +230,44 @@ function DimensionTable({ result }: { result: CrossModelBenchmarkResult }) {
   );
 }
 
-function verdictStyle(stddev: number): string {
-  if (stddev < 0.05) return "bg-emerald-700/60 text-emerald-50";
-  if (stddev < 0.10) return "bg-amber-700/60 text-amber-50";
-  return "bg-rose-700/60 text-rose-50";
+/** Mean trait_adherence across providers — the only dimension that tests
+ *  whether replies actually embody the crystallized traits. Everything
+ *  user-facing keys off this, NOT off mean_overall. */
+function meanTraitAdherence(result: CrossModelBenchmarkResult): number {
+  if (result.substrate_lift) return result.substrate_lift.identity_trait_adherence;
+  // Identity arm only — averaging the control in would drag fidelity down
+  // and misreport it. Rows without an arm predate the control and are
+  // identity by construction.
+  const rows = result.per_provider.filter((p) => (p.arm ?? "identity") === "identity");
+  if (rows.length === 0) return 0;
+  return (
+    rows.reduce((s, p) => s + p.per_dimension_mean.trait_adherence, 0) / rows.length
+  );
+}
+
+/** Badge colour keys off FIDELITY, not variance.
+ *
+ *  Variance alone measures agreement, not correctness — three models can
+ *  converge on the same generic characterization and produce a beautiful
+ *  σ. The 2026-06-09 run scored σ=0.087 within the qwen family while trait
+ *  adherence averaged 0.275, and an earlier build of this component
+ *  rendered that as "Strong substrate signal". It wasn't. */
+function verdictStyle(result: CrossModelBenchmarkResult): string {
+  const fidelity = meanTraitAdherence(result);
+  if (fidelity < 0.4) return "bg-rose-700/60 text-rose-50";
+  if (fidelity < 0.65) return "bg-amber-700/60 text-amber-50";
+  return "bg-emerald-700/60 text-emerald-50";
 }
 
 function verdictNarrative(result: CrossModelBenchmarkResult): string {
-  const meanOfMeans =
-    result.per_provider.reduce((s, p) => s + p.mean_overall, 0) /
-    Math.max(1, result.per_provider.length);
-  const grandMean = meanOfMeans.toFixed(3);
+  const fidelity = meanTraitAdherence(result);
+  const f = fidelity.toFixed(3);
   const stddev = result.cross_provider_stddev.toFixed(3);
-  if (result.cross_provider_stddev < 0.05) {
-    return `Strong substrate signal: ${grandMean} ± ${stddev} mean overall across providers.`;
+  if (fidelity < 0.4) {
+    return `Not demonstrated: mean trait adherence ${f} — the models mostly did not embody the traits. Cross-provider σ ${stddev} reflects them failing similarly, not the substrate working.`;
   }
-  if (result.cross_provider_stddev < 0.10) {
-    return `Moderate substrate signal: ${grandMean} ± ${stddev} mean overall — character mostly carries, with model-driven variance.`;
+  if (fidelity < 0.65) {
+    return `Partial: mean trait adherence ${f}, cross-provider σ ${stddev}. Directional, but not a clean result.`;
   }
-  return `Weak substrate signal: ${grandMean} ± ${stddev} — too much of the character is in the LLM weights, substrate work needed.`;
+  return `Traits embodied at ${f} mean adherence, cross-provider σ ${stddev}. Only meaningful against an identity-disabled control arm.`;
 }

@@ -30,6 +30,11 @@ async function main(): Promise<void> {
       ran_at: string;
       cross_provider_variance: number;
       cross_provider_stddev: number;
+      substrate_lift?: {
+        identity_trait_adherence: number;
+        control_trait_adherence: number | null;
+        lift: number | null;
+      };
       per_provider: {
         provider_id: string;
         mean_overall: number;
@@ -55,6 +60,9 @@ async function main(): Promise<void> {
     scene_labels: parsed.methodology.scenes,
     cross_provider_variance: parsed.aggregate.cross_provider_variance,
     cross_provider_stddev: parsed.aggregate.cross_provider_stddev,
+    // Undefined on runs published before the control arm existed; the UI
+    // falls back to averaging the identity-arm rows.
+    substrate_lift: parsed.aggregate.substrate_lift,
     per_provider: parsed.aggregate.per_provider,
   };
 
