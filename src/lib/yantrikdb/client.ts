@@ -1098,6 +1098,12 @@ export class YantrikClient {
       if (Array.isArray(parsed)) return parsed as any[];
       if (parsed && typeof parsed === "object") {
         const o = parsed as Record<string, unknown>;
+        // The engine replies {"count": N, "results": [...]}. This checked
+        // only `skills` and so returned [] for every well-formed response —
+        // which is why the core-trait promoter saw zero skills even after
+        // defines started landing. skillSurface already handled both keys;
+        // this path was missed.
+        if (Array.isArray(o.results)) return o.results as any[];
         if (Array.isArray(o.skills)) return o.skills as any[];
       }
     } catch {
