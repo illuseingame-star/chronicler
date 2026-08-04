@@ -188,7 +188,7 @@ async function main(): Promise<void> {
 
   // ── Report by phrasing shape — the actual question ──
   const shapeOf = (skill_id: string): "behavior" | "posture" =>
-    skill_id.endsWith("-posture") ? "posture" : "behavior";
+    /_posture$|-posture$/.test(skill_id) ? "posture" : "behavior";
   const tally = { behavior: { pass: 0, fail: 0 }, posture: { pass: 0, fail: 0 } };
 
   for (const p of result.promoted) {

@@ -10,6 +10,7 @@
 
 import type { YantrikClient } from "../yantrikdb/client";
 import { logSkillTransition } from "../instrumentation/skill-transition-log";
+import { readOutcomesPreferringSubstrate } from "./outcome-mirror";
 import {
   decodeNote,
   type OutcomeRecord,
@@ -230,13 +231,20 @@ export class CoreTraitPromoter {
       if (!full) continue;
       out.push({
         skill_id: s.skill_id,
-        body: s.body,
-        applies_to: s.applies_to,
-        outcomes: ((full.outcomes ?? []) as Array<{
-          succeeded: boolean;
-          note?: string;
-          at?: string;
-        }>).map((o) => ({
+        // From `full`, not `s`: the engine's skill LIST response omits the
+        // body entirely (only `get` returns it). Reading it off the list
+        // entry sent an undefined body to the verifier, which duly rejected
+        // every candidate with "the candidate trait is undefined".
+        body: full.body ?? s.body ?? "",
+        applies_to: full.applies_to ?? s.applies_to,
+        // Substrate first, local mirror as fallback. YantrikDB accepts
+        // outcomes but returns none on read, so today this always resolves
+        // to the mirror; the moment the engine exposes them, substrate data
+        // wins with no change here.
+        outcomes: readOutcomesPreferringSubstrate(
+          s.skill_id,
+          full.outcomes as Array<{ succeeded: boolean; note?: string; at: string }> | undefined
+        ).map((o) => ({
           succeeded: o.succeeded,
           note: o.note,
           at: o.at ?? "",

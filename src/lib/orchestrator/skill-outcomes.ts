@@ -27,6 +27,7 @@ import {
   logSkillTransition,
   type SkillState,
 } from "../instrumentation/skill-transition-log";
+import { mirrorOutcome } from "../skills/outcome-mirror";
 
 export interface SkillObservation {
   /** Surfaced into the prompt at this turn index (0-based, monotonic
@@ -207,9 +208,18 @@ export class SkillOutcomeTracker {
         score: score as 1 | -1,
         reason,
       };
+      const encoded = encodeNote(note);
       await this.client
-        .skillOutcome(skill_id, score === 1, encodeNote(note))
+        .skillOutcome(skill_id, score === 1, encoded)
         .catch(() => undefined);
+      // Mirror locally: the substrate accepts outcomes but exposes them
+      // through no read action, so without this every evidence computation
+      // sees an empty list. See src/lib/skills/outcome-mirror.ts.
+      mirrorOutcome(skill_id, {
+        succeeded: score === 1,
+        note: encoded,
+        at: now.toISOString(),
+      });
 
       // Re-fetch to derive new state from the full history.
       const skill = await this.client.skillGet(skill_id);
