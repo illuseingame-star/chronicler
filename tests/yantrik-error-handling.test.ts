@@ -218,8 +218,102 @@ async function test_client_remember_surfaces_server_error(): Promise<void> {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Exactly-once — retry must not duplicate durable writes
+// ────────────────────────────────────────────────────────────────────
+
+/** Server that commits on every call but loses the response for the first
+ *  N — the shape that produced 3 rows for 1 fact before idempotency keys.
+ *  Honors keys the way the v0.10 engine does. */
+function committingServer(failFirst: number) {
+  const durable = new Map<string, string>();
+  let calls = 0;
+  const transport: YantrikDBTransport = {
+    async call(_tool, args) {
+      calls++;
+      const a = args as {
+        text?: string;
+        idempotency_key?: string;
+        memories?: Array<{ text?: string; idempotency_key?: string }>;
+      };
+      const upsert = (key: string | undefined): string => {
+        if (key && durable.has(key)) return durable.get(key)!;
+        const rid = `rid-${durable.size + 1}`;
+        durable.set(key ?? `nokey-${calls}-${durable.size}`, rid);
+        return rid;
+      };
+      const queueFull = {
+        result:
+          "Error executing tool remember: ingest queue full; retry after 5ms",
+      };
+      if (Array.isArray(a.memories)) {
+        const rids = a.memories.map((m) => upsert(m.idempotency_key));
+        if (calls <= failFirst) return queueFull;
+        return { result: JSON.stringify({ rids, count: rids.length }) };
+      }
+      const rid = upsert(a.idempotency_key);
+      if (calls <= failFirst) return queueFull;
+      return { result: JSON.stringify({ rid, status: "recorded" }) };
+    },
+  };
+  return { transport, durable };
+}
+
+async function test_lost_response_does_not_duplicate(): Promise<void> {
+  console.log("--- exactly-once: commit + lost response + retry ⇒ ONE row ---");
+  const { transport, durable } = committingServer(2);
+  const client = new YantrikClient(transport);
+  const { rid } = await client.remember({
+    text: "Ren promised to meet Pranab at the lighthouse",
+    namespace: "t",
+    metadata: {},
+  });
+  assert(rid, "a rid came back");
+  eq(durable.size, 1, "exactly one durable row despite two lost responses");
+  ok("no double-write");
+}
+
+async function test_batch_replay_is_idempotent(): Promise<void> {
+  console.log("--- exactly-once: replaying a batch operation does not duplicate ---");
+  const { transport, durable } = committingServer(0);
+  const client = new YantrikClient(transport);
+  const rows = [
+    { text: "Pranab's cat is named Kiku", namespace: "t", metadata: {} },
+    { text: "Pranab grew up in Oji", namespace: "t", metadata: {} },
+  ];
+  await client.rememberBatch(rows, { operation_id: "turn-7" });
+  await client.rememberBatch(rows, { operation_id: "turn-7" });
+  eq(durable.size, 2, "two facts, replayed once, still two rows");
+  ok("batch replay collapses");
+}
+
+async function test_distinct_operations_stay_distinct(): Promise<void> {
+  console.log("--- exactly-once: does NOT over-collapse independent writes ---");
+  const { transport, durable } = committingServer(0);
+  const client = new YantrikClient(transport);
+  await client.remember({ text: "fact A", namespace: "t", metadata: {} });
+  await client.remember({ text: "fact B", namespace: "t", metadata: {} });
+  eq(durable.size, 2, "two independent facts remain two rows");
+  ok("no over-collapse");
+}
+
+async function test_caller_supplied_key_wins(): Promise<void> {
+  console.log("--- exactly-once: an explicit key makes repeats collapse ---");
+  const { transport, durable } = committingServer(0);
+  const client = new YantrikClient(transport);
+  const key = "extraction:session-1:turn-3:0";
+  await client.remember({ text: "same fact", namespace: "t", metadata: {}, idempotency_key: key });
+  await client.remember({ text: "same fact", namespace: "t", metadata: {}, idempotency_key: key });
+  eq(durable.size, 1, "same caller key ⇒ one row across separate calls");
+  ok("caller-supplied key honored");
+}
+
 (async () => {
   try {
+    await test_lost_response_does_not_duplicate();
+    await test_batch_replay_is_idempotent();
+    await test_distinct_operations_stay_distinct();
+    await test_caller_supplied_key_wins();
     test_parses_valid_json_result();
     test_classifies_ingest_queue_full_as_queue_full();
     test_classifies_not_found();

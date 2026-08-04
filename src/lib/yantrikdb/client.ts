@@ -165,6 +165,87 @@ export async function retryOnBackpressure<T>(
   throw lastErr;
 }
 
+// ── Exactly-once writes ────────────────────────────────────────────
+//
+// retryOnBackpressure alone is NOT exactly-once. If the server commits a
+// write and the response is then lost (timeout, dropped connection, or a
+// queue-full raised after commit), the retry writes the fact again.
+// Demonstrated in scripts/probe-retry-doublewrite.ts: three durable rows
+// for one logical fact.
+//
+// The engine gained idempotency keys in v0.10. The key must identify the
+// LOGICAL OPERATION and be allocated BEFORE the call, so every retry of
+// that operation presents the same key. Deriving it from the payload does
+// not work: a nondeterministic extractor can reorder, paraphrase, or emit
+// a different number of claims on retry, producing different keys for what
+// is semantically the same operation.
+//
+// Same key + same text -> the ORIGINAL rid, zero additional writes.
+// Same key + different text -> a typed conflict, surfaced not swallowed.
+
+// Whether THIS server accepts idempotency keys. Probed at runtime, never
+// assumed from a version string.
+//
+// Keys require the engine-side (bundled) embedder. Chronicler deliberately
+// runs the ONNX embedder instead — it produces the 384-dim vectors that
+// existing chronicler volumes were built against, and switching would make
+// every stored memory unrecallable. With a wrapper-side embedder the engine
+// refuses keys outright:
+//
+//   "idempotency_key with a Python-side fallback embedder is not supported:
+//    the wrapper generates the vector outside the engine, so a drift across
+//    retries would fake a conflict."
+//
+// That refusal is correct — a drifting vector would produce false conflicts.
+// So exactly-once is genuinely unavailable on this deployment, and the
+// client degrades LOUDLY (one warning, then keys are omitted) rather than
+// sending a key that turns every write into an error.
+//
+// null = not yet probed | true = accepted | false = refused, stop sending
+let idempotencySupported: boolean | null = null;
+
+/** Test seam + operator override. */
+export function setIdempotencySupport(v: boolean | null): void {
+  idempotencySupported = v;
+}
+export function getIdempotencySupport(): boolean | null {
+  return idempotencySupported;
+}
+
+/** The engine reports this as a JSON body with an `error` field rather than
+ *  the "Error executing tool" string, so it parses cleanly and then has no
+ *  rid — which surfaced as a confusing "remember returned no rid". */
+function isIdempotencyUnsupported(parsed: unknown): boolean {
+  const err = (parsed as { error?: unknown })?.error;
+  return typeof err === "string" && /idempotency_key not usable/i.test(err);
+}
+
+let warnedNoIdempotency = false;
+function warnIdempotencyUnavailable(detail: string): void {
+  if (warnedNoIdempotency) return;
+  warnedNoIdempotency = true;
+  console.warn(
+    "[yantrikdb] idempotency keys unavailable on this server; writes are " +
+      "at-least-once, not exactly-once. A lost response after a commit can " +
+      "duplicate a memory. Requires the engine (bundled) embedder; this " +
+      "deployment uses the ONNX embedder for 384-dim volume compatibility. " +
+      `Engine said: ${detail.slice(0, 160)}`
+  );
+}
+
+let opCounter = 0;
+
+/** Allocate a stable id for one logical write operation. Call this ONCE at
+ *  the side-effect boundary, then pass the same value through every retry. */
+export function newOperationId(prefix = "op"): string {
+  const rand =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  opCounter = (opCounter + 1) % Number.MAX_SAFE_INTEGER;
+  return `${prefix}-${rand}-${opCounter}`;
+}
+
 export class YantrikClient {
   constructor(private transport: YantrikDBTransport) {}
 
@@ -180,33 +261,81 @@ export class YantrikClient {
       valence: input.valence ?? 0,
     };
     if (input.emotional_state) args.emotional_state = input.emotional_state;
+    // Allocated ONCE, outside the retry loop, so every attempt presents the
+    // same key and a commit whose response was lost is recognized rather
+    // than repeated. Omitted entirely once the server has told us it can't
+    // accept keys — sending one there makes every write fail.
+    const idemKey = input.idempotency_key ?? newOperationId("mem");
+    if (idempotencySupported !== false) args.idempotency_key = idemKey;
     // Retry on ingest-queue backpressure — the queue drains steadily even
     // when full, so a short backoff usually succeeds. Non-retryable errors
     // (server_error, not_found, malformed) propagate on the first attempt.
     const parsed = (await retryOnBackpressure(async () => {
       const res = await this.transport.call("remember", args);
-      return parseYantrikResult(res, "remember");
+      const out = parseYantrikResult(res, "remember");
+      // Runtime capability detection: the server tells us keys are
+      // unusable, we record that and retry this same write without one.
+      // Costs a single extra round-trip, once per process.
+      if (isIdempotencyUnsupported(out)) {
+        idempotencySupported = false;
+        warnIdempotencyUnavailable(String((out as { error?: string }).error ?? ""));
+        delete args.idempotency_key;
+        const retry = await this.transport.call("remember", args);
+        return parseYantrikResult(retry, "remember");
+      }
+      if (idempotencySupported === null) idempotencySupported = true;
+      return out;
     })) as { rid?: string; rids?: string[] };
     const rid = parsed.rid ?? parsed.rids?.[0];
     if (!rid) throw new Error("remember returned no rid");
     return { rid };
   }
 
-  async rememberBatch(inputs: RememberInput[]): Promise<string[]> {
-    const memories = inputs.map((i) => ({
-      text: i.text,
-      memory_type: i.memory_type ?? "semantic",
-      importance: i.importance ?? 0.5,
-      certainty: i.certainty ?? 0.8,
-      source: i.source ?? "user",
-      namespace: i.namespace,
-      metadata: metadataForYantrik(i.metadata),
-      valence: i.valence ?? 0,
-      ...(i.emotional_state ? { emotional_state: i.emotional_state } : {}),
-    }));
+  /** Batch write. `operation_id` identifies the whole batch as ONE logical
+   *  operation — pass the same value when retrying it (e.g. re-running a
+   *  turn's extraction) so the engine returns the original rids instead of
+   *  writing the batch twice. Per-item keys are scoped under it. */
+  async rememberBatch(
+    inputs: RememberInput[],
+    opts: { operation_id?: string } = {}
+  ): Promise<string[]> {
+    // Allocated before the call, so it is stable across every retry below.
+    const operationId = opts.operation_id ?? newOperationId("batch");
+    const buildMemories = (withKeys: boolean) =>
+      inputs.map((i, idx) => ({
+        text: i.text,
+        memory_type: i.memory_type ?? "semantic",
+        importance: i.importance ?? 0.5,
+        certainty: i.certainty ?? 0.8,
+        source: i.source ?? "user",
+        namespace: i.namespace,
+        metadata: metadataForYantrik(i.metadata),
+        valence: i.valence ?? 0,
+        // Index-scoped so a batch of N distinct facts stays N rows, while a
+        // retry of the same batch collapses onto the same N keys.
+        ...(withKeys
+          ? { idempotency_key: i.idempotency_key ?? `${operationId}:${idx}` }
+          : {}),
+        ...(i.emotional_state ? { emotional_state: i.emotional_state } : {}),
+      }));
+
     const parsed = (await retryOnBackpressure(async () => {
-      const res = await this.transport.call("remember", { memories });
-      return parseYantrikResult(res, "remember");
+      const useKeys = idempotencySupported !== false;
+      const res = await this.transport.call("remember", {
+        memories: buildMemories(useKeys),
+        ...(useKeys ? { idempotency_key: operationId } : {}),
+      });
+      const out = parseYantrikResult(res, "remember");
+      if (isIdempotencyUnsupported(out)) {
+        idempotencySupported = false;
+        warnIdempotencyUnavailable(String((out as { error?: string }).error ?? ""));
+        const retry = await this.transport.call("remember", {
+          memories: buildMemories(false),
+        });
+        return parseYantrikResult(retry, "remember");
+      }
+      if (idempotencySupported === null) idempotencySupported = true;
+      return out;
     })) as { rids?: string[] };
     return parsed.rids ?? [];
   }

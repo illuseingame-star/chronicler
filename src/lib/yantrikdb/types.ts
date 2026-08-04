@@ -99,6 +99,13 @@ export interface RememberInput {
   emotional_state?: EmotionalState;
   namespace: string;
   metadata: ChroniclerMetadata;
+  /** Stable id for the logical write operation this memory belongs to.
+   *  Supply it when a caller may retry the SAME operation — the engine
+   *  then returns the original rid instead of writing a duplicate. When
+   *  omitted the client allocates one per call, which still protects
+   *  against transport-level retries inside that call.
+   *  See newOperationId() in ./client.ts. */
+  idempotency_key?: string;
 }
 
 export interface RecallQuery {
