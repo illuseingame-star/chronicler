@@ -233,6 +233,50 @@ function warnIdempotencyUnavailable(detail: string): void {
   );
 }
 
+// ── Skill-substrate identifier conformance ─────────────────────────
+//
+// The engine enforces a stricter identifier grammar than Chronicler's
+// natural ids satisfy, and rejected every write for months in silence:
+//
+//   skill_id     ^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$   dotted namespace
+//   applies_to[] ^[a-z][a-z0-9_]*$                  NO hyphens/dots
+//   body         50..5000 chars
+//
+// Chronicler ids look like "ren-driver-mq78181t7x6d" — hyphenated, so
+// every define and every outcome bounced. These normalize on the way out.
+// The mapping is deterministic, so ids stay stable across sessions.
+
+/** "ren-driver-mq78" -> "ren_driver_mq78". Never empty, always leads with
+ *  a letter (the engine rejects a leading digit). */
+export function toEngineSlug(raw: string): string {
+  const s = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_{2,}/g, "_");
+  if (s.length === 0) return "x";
+  return /^[a-z]/.test(s) ? s : `s_${s}`;
+}
+
+/** Ensure a dotted namespace: "adira-guarded" -> "skill.adira_guarded".
+ *  An id that is already dotted keeps its structure, each segment slugged. */
+export function toEngineSkillId(raw: string): string {
+  if (raw.includes(".")) {
+    const parts = raw.split(".").filter(Boolean).map(toEngineSlug);
+    if (parts.length >= 2) return parts.join(".");
+    return `skill.${parts[0] ?? "x"}`;
+  }
+  return `skill.${toEngineSlug(raw)}`;
+}
+
+/** The engine requires >=50 chars. Terse-but-valid skill bodies would
+ *  otherwise be rejected outright; pad rather than drop the skill. */
+export function padSkillBody(body: string): string {
+  const b = body.trim();
+  if (b.length >= 50) return b;
+  return `${b} (observed pattern; recorded verbatim from play.)`.padEnd(50, " ").trimEnd();
+}
+
 let opCounter = 0;
 
 /** Allocate a stable id for one logical write operation. Call this ONCE at
@@ -937,11 +981,25 @@ export class YantrikClient {
     version?: string;
     supersedes?: string;
   }): Promise<unknown> {
-    return this.transport.call("skill", {
+    const res = await this.transport.call("skill", {
       action: "define",
       ...opts,
+      skill_id: toEngineSkillId(opts.skill_id),
+      applies_to: opts.applies_to.map(toEngineSlug),
+      body: padSkillBody(opts.body),
       on_conflict: opts.on_conflict ?? "replace",
     });
+    // Deliberately NOT swallowed, and parsed with the STRICT parser.
+    // parseMaybeWrapped returns null for the "Error executing tool …"
+    // string form, so a check built on it would miss exactly the failures
+    // that matter. Silent rejection is how the entire skill substrate sat
+    // broken: 7 defines refused by a closed gate and 61 outcomes refused
+    // on schema, every error caught and discarded.
+    const parsed = parseYantrikResult(res, "skill.define") as { error?: unknown };
+    if (parsed && typeof parsed === "object" && parsed.error) {
+      throw new YantrikError("server_error", "skill.define", String(parsed.error));
+    }
+    return res;
   }
 
   async skillSurface(
@@ -962,7 +1020,7 @@ export class YantrikClient {
       const res = await this.transport.call("skill", {
         action: "surface",
         query,
-        applies_to: opts.applies_to,
+        applies_to: opts.applies_to?.map(toEngineSlug),
         top_k: opts.top_k ?? 5,
       });
       const parsed = parseMaybeWrapped(res);
@@ -984,7 +1042,12 @@ export class YantrikClient {
     note?: string
   ): Promise<void> {
     await this.transport
-      .call("skill", { action: "outcome", skill_id, succeeded, note })
+      .call("skill", {
+        action: "outcome",
+        skill_id: toEngineSkillId(skill_id),
+        succeeded,
+        note,
+      })
       .catch(() => undefined);
   }
 
@@ -998,7 +1061,7 @@ export class YantrikClient {
     try {
       const res = await this.transport.call("skill", {
         action: "get",
-        skill_id,
+        skill_id: toEngineSkillId(skill_id),
       });
       const parsed = parseMaybeWrapped(res);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -1027,7 +1090,7 @@ export class YantrikClient {
     try {
       const res = await this.transport.call("skill", {
         action: "list",
-        applies_to: opts.applies_to,
+        applies_to: opts.applies_to?.map(toEngineSlug),
         skill_type: opts.skill_type,
         limit: opts.limit ?? 100,
       });

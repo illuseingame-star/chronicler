@@ -25,6 +25,13 @@ services:
     environment:
       YANTRIKDB_DB_PATH: /data/memory.db
       YANTRIKDB_API_KEY: ${YANTRIKDB_API_KEY:-}
+      # REQUIRED for the skills substrate. Off by default on the MCP server,
+      # which silently rejected every skill define with `gate_closed` — the
+      # Character-development tab and the whole core-trait/identity layer
+      # could never populate. Chronicler IS the agent authoring these skills
+      # (verifier-gated, user-reviewable in the inspector), so the gate is
+      # opened deliberately here rather than left to chance.
+      YANTRIKDB_SKILLS_WRITE_ENABLED: "true"
       # Force HF Hub's legacy download protocol — the newer xet chunked
       # protocol can stall behind some Docker/Colima network configs on
       # macOS, leaving the model fetch hung at 0 bytes. Adds 1-2s to the
