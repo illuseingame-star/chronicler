@@ -3,7 +3,7 @@
 **A local-first alternative to SillyTavern, RisuAI, and Faraday, built around memory that survives long campaigns.**
 
 [![Docker images](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/orgs/yantrikos/packages)
-[![License](https://img.shields.io/badge/license-see%20LICENSE-lightgrey)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-27%2F27%20green-brightgreen)](#develop)
 
 Chronicler is an open-source, self-hosted **AI roleplay and character-chat app** you run on your own machine with `docker compose up`. It imports the community **v2/v3 character card** format (chub.ai-compatible), talks to **any OpenAI-compatible LLM** — Ollama, OpenAI, Anthropic, OpenRouter, llama.cpp, vLLM, nano-gpt — and remembers what matters about every character across every session, automatically and locally, without sending anything to a cloud.
@@ -234,9 +234,23 @@ npm run test:integration
 - A hosted SaaS offering — this is self-hosted by design
 - Full plugin ecosystem — intentionally closed surface until dogfood signal says otherwise
 
+## Related projects
+
+Chronicler is the roleplay client. The memory underneath it is a separate stack you can use on its own:
+
+- [yantrikdb](https://github.com/yantrikos/yantrikdb) — the cognitive memory engine Chronicler stores canon in: temporal decay, consolidation, contradiction detection. Rust with Python bindings, Apache-2.0.
+- [yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) — the same memory as an MCP server for Claude Code, Cursor and Windsurf (`pip install yantrikdb-mcp`). This is what Chronicler's docker-compose runs.
+- [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) — HTTP gateway and HA cluster, if you want one memory store behind several clients.
+- [@chronicler/grimoire](https://www.npmjs.com/package/@chronicler/grimoire) — the plugin SDK for extending this app (hooks, slash commands, UI slots, MCP integration).
+
 ## License
 
-TBD before public release.
+MIT — see [LICENSE](LICENSE).
+
+Chronicler talks to [YantrikDB](https://github.com/yantrikos/yantrikdb) over
+its MCP server (the default in `docker-compose.yml`). The engine is Apache-2.0
+as of 2026-08-18, so both sides of that boundary are permissive and nothing
+here imposes obligations on your own code or a service you host.
 
 ---
 
