@@ -1,5 +1,7 @@
 {
   "name": "chronicler",
+  "description": "Self-hosted AI roleplay client with memory that survives long campaigns — tiered canon/heuristic/reflex writes, retrieval-time privacy ACL for group chats, native MCP tool support.",
+  "keywords": ["ai-roleplay", "ai-companion", "chatbot", "character-card", "sillytavern", "long-term-memory", "mcp", "model-context-protocol", "self-hosted", "local-first", "llm"],
   "private": true,
   "version": "0.5.0",
   "type": "module",
